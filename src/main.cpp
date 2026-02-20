@@ -5,7 +5,8 @@
 // Sindarin: dan (against/back) + tir (to watch) = counter-watcher
 //
 // Forked from OUI Spy Unified Blue — Flock-You mode
-// Original: https://github.com/lukeswitz/oui-spy
+// Original: https://github.com/colonelpanichacks/oui-spy-unified-blue
+// BLE detection research: https://github.com/wgreenberg/flock-you
 //
 // Detection methods:
 //   BLE:
