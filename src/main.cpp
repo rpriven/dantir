@@ -121,6 +121,12 @@ static const char* wifi_mac_prefixes[] = {
 };
 
 // ============================================================================
+// WIFI PROMISCUOUS MODE — frame subtypes
+// ============================================================================
+#define WIFI_MGMT_PROBE_REQ  0x04
+#define WIFI_MGMT_BEACON     0x08
+
+// ============================================================================
 // RAVEN SURVEILLANCE DEVICE UUID PATTERNS
 // ============================================================================
 
@@ -178,6 +184,8 @@ static Adafruit_NeoPixel fyPixel(1, FY_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 static bool fyPixelAlertMode = false;
 static unsigned long fyPixelAlertStart = 0;
 static unsigned long fyLastBleScan = 0;
+static volatile bool fyWifiAlertPending = false;  // Deferred from promiscuous CB
+static int fyWifiDetCount = 0;
 static bool fyTriggered = false;
 static bool fyDeviceInRange = false;
 static unsigned long fyLastDetTime = 0;
@@ -383,6 +391,78 @@ static bool checkWiFiMACPrefix(const uint8_t* mac) {
     }
     return false;
 }
+
+// ============================================================================
+// WIFI PROMISCUOUS CALLBACK
+// ============================================================================
+// Called by the WiFi driver for every frame on the AP's channel.
+// Probe requests from devices scanning (on ANY channel) are caught because
+// WiFi devices sweep all channels when probing. Beacons only on AP channel.
+// NOTE: Runs on the WiFi task — do NOT call delay()/tone() here.
+// Audio/LED alerts are deferred to the main loop via fyWifiAlertPending.
+
+static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT) return;
+
+    const wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *frame = pkt->payload;
+    int len = pkt->rx_ctrl.sig_len;
+
+    // Minimum 802.11 management header: 24 bytes
+    // (FC:2 + Duration:2 + Addr1:6 + Addr2:6 + Addr3:6 + SeqCtrl:2)
+    if (len < 24) return;
+
+    // Frame Control byte 0: bits[3:2]=type, bits[7:4]=subtype
+    uint8_t fc0 = frame[0];
+    uint8_t frame_type = (fc0 >> 2) & 0x03;
+    uint8_t subtype = (fc0 >> 4) & 0x0F;
+
+    if (frame_type != 0) return;  // Not a management frame
+    if (subtype != WIFI_MGMT_PROBE_REQ && subtype != WIFI_MGMT_BEACON) return;
+
+    // Address 2 (source/transmitter MAC) at offset 10
+    const uint8_t *src_mac = &frame[10];
+
+    if (!checkWiFiMACPrefix(src_mac)) return;
+
+    // Match! Build MAC string and register detection
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+             src_mac[0], src_mac[1], src_mac[2],
+             src_mac[3], src_mac[4], src_mac[5]);
+
+    const char *method = (subtype == WIFI_MGMT_PROBE_REQ) ? "wifi_probe" : "wifi_beacon";
+    int rssi = pkt->rx_ctrl.rssi;
+
+    int idx = fyAddDetection(mac_str, "", rssi, method);
+    if (idx >= 0) {
+        if (fyDet[idx].count == 1) {
+            // First sighting — new WiFi surveillance device
+            fyWifiDetCount++;
+            printf("[DANTIR] WiFi DETECTED: %s RSSI:%d [%s]\n", mac_str, rssi, method);
+
+            // JSON serial output
+            char gpsBuf[80] = "";
+            if (fyGPSIsFresh()) {
+                snprintf(gpsBuf, sizeof(gpsBuf),
+                    ",\"gps\":{\"latitude\":%.8f,\"longitude\":%.8f,\"accuracy\":%.1f}",
+                    fyGPSLat, fyGPSLon, fyGPSAcc);
+            }
+            printf("{\"detection_method\":\"%s\",\"protocol\":\"wifi\","
+                   "\"mac_address\":\"%s\",\"rssi\":%d%s}\n",
+                   method, mac_str, rssi, gpsBuf);
+        }
+
+        // Defer buzzer/LED alert to main loop (can't call delay() here)
+        fyDeviceInRange = true;
+        fyLastDetTime = millis();
+        fyWifiAlertPending = true;
+    }
+}
+
+// ============================================================================
+// DETECTION HELPERS — NAME & MANUFACTURER
+// ============================================================================
 
 static bool checkDeviceName(const char* name) {
     if (!name || !name[0]) return false;
@@ -845,7 +925,7 @@ h4{color:#ec4899;font-size:14px;margin-bottom:8px}
 <div class="st">
 <div class="sc"><div class="n" id="sT">0</div><div class="l">DETECTED</div></div>
 <div class="sc"><div class="n" id="sR">0</div><div class="l">RAVEN</div></div>
-<div class="sc"><div class="n" id="sB">ON</div><div class="l">BLE</div></div>
+<div class="sc"><div class="n" id="sB">ON</div><div class="l">BLE+WiFi</div></div>
 <div class="sc" onclick="reqGPS()" style="cursor:pointer"><div class="n" id="sG" style="font-size:14px">TAP</div><div class="l" id="sGL">GPS</div></div>
 </div>
 <div class="tb">
@@ -856,7 +936,7 @@ h4{color:#ec4899;font-size:14px;margin-bottom:8px}
 </div>
 <div class="cn">
 <div class="pn a" id="p0">
-<div id="dL"><div class="empty">Scanning for surveillance devices...<br>BLE active on all channels</div></div>
+<div id="dL"><div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div></div>
 </div>
 <div class="pn" id="p1"><div id="hL"><div class="empty">Loading prior session...</div></div></div>
 <div class="pn" id="p2"><div id="pC">Loading patterns...</div></div>
@@ -878,7 +958,7 @@ h4{color:#ec4899;font-size:14px;margin-bottom:8px}
 let D=[],H=[];
 function tab(i,el){document.querySelectorAll('.tb button').forEach(b=>b.classList.remove('a'));document.querySelectorAll('.pn').forEach(p=>p.classList.remove('a'));el.classList.add('a');document.getElementById('p'+i).classList.add('a');if(i===1&&!window._hL)loadHistory();if(i===2&&!window._pL)loadPat();}
 function refresh(){fetch('/api/detections').then(r=>r.json()).then(d=>{D=d;render();stats();}).catch(()=>{});}
-function render(){const el=document.getElementById('dL');if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices...<br>BLE active on all channels</div>';return;}
+function render(){const el=document.getElementById('dL');if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>';return;}
 D.sort((a,b)=>b.last-a.last);el.innerHTML=D.map(card).join('');}
 function stats(){document.getElementById('sT').textContent=D.length;document.getElementById('sR').textContent=D.filter(d=>d.raven).length;
 fetch('/api/stats').then(r=>r.json()).then(s=>{let g=document.getElementById('sG'),gl=document.getElementById('sGL');if(s.gps_src==='hw'){g.textContent=s.gps_sats+'sat';g.style.color='#22c55e';gl.textContent='HW GPS';}else if(s.gps_src==='phone'){g.textContent=s.gps_tagged+'/'+s.total;g.style.color='#22c55e';gl.textContent='PHONE';}else if(s.gps_hw_detected){g.textContent=s.gps_sats+'sat';g.style.color='#facc15';gl.textContent='NO FIX';}else{g.textContent='TAP';g.style.color='#ef4444';gl.textContent='GPS';}}).catch(()=>{});}
@@ -947,12 +1027,13 @@ static void fySetupServer() {
         const char* gpsSrc = "none";
         if (fyGPSIsHardware && fyHWGPSFix) gpsSrc = "hw";
         else if (fyGPSIsFresh()) gpsSrc = "phone";
-        char buf[320];
+        char buf[384];
         snprintf(buf, sizeof(buf),
-            "{\"total\":%d,\"raven\":%d,\"ble\":\"active\","
+            "{\"total\":%d,\"raven\":%d,\"ble\":\"active\",\"wifi\":\"active\","
+            "\"wifi_det\":%d,"
             "\"gps_valid\":%s,\"gps_age\":%lu,\"gps_tagged\":%d,"
             "\"gps_src\":\"%s\",\"gps_sats\":%d,\"gps_hw_detected\":%s}",
-            fyDetCount, raven,
+            fyDetCount, raven, fyWifiDetCount,
             fyGPSIsFresh() ? "true" : "false",
             fyGPSValid ? (millis() - fyGPSLastUpdate) : 0UL,
             withGPS,
@@ -1224,6 +1305,13 @@ void setup() {
     printf("[DANTIR] AP: %s / %s\n", FY_AP_SSID, FY_AP_PASS);
     printf("[DANTIR] IP: %s\n", WiFi.softAPIP().toString().c_str());
 
+    // Enable WiFi promiscuous mode — captures management frames on AP channel
+    // Probe requests from devices scanning other channels are still caught
+    // because WiFi devices sweep all channels during active scanning
+    esp_wifi_set_promiscuous_rx_cb(fyWifiPromiscuousCB);
+    esp_wifi_set_promiscuous(true);
+    printf("[DANTIR] WiFi promiscuous mode ACTIVE (ch %d)\n", WiFi.channel());
+
     // Start web dashboard
     fySetupServer();
 
@@ -1232,10 +1320,10 @@ void setup() {
         (int)(sizeof(device_name_patterns)/sizeof(device_name_patterns[0])),
         (int)(sizeof(ble_manufacturer_ids)/sizeof(ble_manufacturer_ids[0])),
         (int)(sizeof(raven_service_uuids)/sizeof(raven_service_uuids[0])));
-    printf("[DANTIR] WiFi: %d OUI prefixes (promiscuous mode pending)\n",
+    printf("[DANTIR] WiFi: %d OUI prefixes (promiscuous mode ACTIVE)\n",
         (int)(sizeof(wifi_mac_prefixes)/sizeof(wifi_mac_prefixes[0])));
     printf("[DANTIR] Dashboard: http://192.168.4.1\n");
-    printf("[DANTIR] Ready - no WiFi connection needed, BLE + AP only\n\n");
+    printf("[DANTIR] Ready - BLE scanning + WiFi promiscuous + AP dashboard\n\n");
 }
 
 void loop() {
@@ -1250,6 +1338,16 @@ void loop() {
 
     if (!fyBLEScan->isScanning() && millis() - fyLastBleScan > BLE_SCAN_DURATION * 1000) {
         fyBLEScan->clearResults();
+    }
+
+    // WiFi detection alert (deferred from promiscuous callback — can't buzz there)
+    if (fyWifiAlertPending) {
+        fyWifiAlertPending = false;
+        if (!fyTriggered) {
+            fyTriggered = true;
+            fyDetectBeep();
+        }
+        fyLastHB = millis();
     }
 
     // Heartbeat tracking
