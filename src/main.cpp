@@ -37,6 +37,8 @@
 #include <stdint.h>
 #include "esp_wifi.h"
 #include <TinyGPS++.h>
+#include <Adafruit_NeoPixel.h>
+#include <ESPAsyncWebServer.h>
 
 // ============================================================================
 // CONFIGURATION
@@ -395,6 +397,12 @@ static bool checkWiFiMACPrefix(const uint8_t* mac) {
 // ============================================================================
 // WIFI PROMISCUOUS CALLBACK
 // ============================================================================
+// Forward declarations for functions called by WiFi promiscuous callback
+static bool fyGPSIsFresh();
+static int fyAddDetection(const char* mac, const char* name, int rssi,
+                          const char* method, bool isRaven = false,
+                          const char* ravenFW = "");
+
 // Called by the WiFi driver for every frame on the AP's channel.
 // Probe requests from devices scanning (on ANY channel) are caught because
 // WiFi devices sweep all channels when probing. Beacons only on AP channel.
@@ -589,8 +597,8 @@ static void fyProcessHardwareGPS() {
 // ============================================================================
 
 static int fyAddDetection(const char* mac, const char* name, int rssi,
-                          const char* method, bool isRaven = false,
-                          const char* ravenFW = "") {
+                          const char* method, bool isRaven,
+                          const char* ravenFW) {
     if (!fyMutex || xSemaphoreTake(fyMutex, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
 
     // Update existing by MAC
