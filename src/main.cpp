@@ -897,41 +897,80 @@ static const char FY_HTML[] PROGMEM = R"rawliteral(
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>DANTIR</title>
 <style>
+:root{
+--bg-body:#0a0012;--bg-hdr:#1a0033;--bg-card:linear-gradient(135deg,rgba(45,27,105,.5),rgba(30,15,80,.3));
+--bg-stats:rgba(139,92,246,.08);--bg-tag:rgba(139,92,246,.15);
+--a1:#ec4899;--a2:#8b5cf6;--a3:#c084fc;
+--b1:#ec4899;--b2:rgba(139,92,246,.25);--b3:rgba(139,92,246,.19);
+--t1:#e0e0e0;--t2:rgba(139,92,246,.5);
+--grid:rgba(236,72,153,.02);
+--rr:rgba(139,92,246,.2);--rs:rgba(236,72,153,.4);
+--bl-flock:#8b5cf6;--bl-ring:#ef4444;--bl-raven:#dc2626;--bl-other:#6b7280;
+--btn-bg:#8b5cf6;--btn-act:#ec4899;
+}
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden}
-body{font-family:'Courier New',monospace;background:#0a0012;color:#e0e0e0;display:flex;flex-direction:column}
-.hd{background:#1a0033;padding:10px 14px;border-bottom:2px solid #ec4899;flex-shrink:0}
-.hd h1{font-size:22px;color:#ec4899;letter-spacing:3px}
-.hd .sub{font-size:11px;color:#8b5cf6;margin-top:2px}
-.st{display:flex;gap:8px;padding:8px 12px;background:rgba(139,92,246,.08);border-bottom:1px solid rgba(139,92,246,.19);flex-shrink:0}
-.sc{flex:1;text-align:center;padding:6px;border:1px solid rgba(139,92,246,.25);border-radius:5px}
-.sc .n{font-size:22px;font-weight:bold;color:#ec4899}
-.sc .l{font-size:10px;color:#8b5cf6;margin-top:2px}
-.tb{display:flex;border-bottom:1px solid #8b5cf6;flex-shrink:0}
-.tb button{flex:1;padding:9px;text-align:center;cursor:pointer;color:#8b5cf6;border:none;background:none;font-family:inherit;font-size:13px;font-weight:bold;letter-spacing:1px}
-.tb button.a{color:#ec4899;border-bottom:2px solid #ec4899;background:rgba(236,72,153,.08)}
-.cn{flex:1;overflow-y:auto;padding:10px}
+body{font-family:'Courier New',monospace;background:var(--bg-body);color:var(--t1);display:flex;flex-direction:column}
+body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;
+background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:50px 50px}
+.hd{background:var(--bg-hdr);padding:10px 14px;border-bottom:2px solid var(--b1);flex-shrink:0;position:relative;z-index:1;
+display:flex;justify-content:space-between;align-items:center}
+.hd::after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--a1),transparent);opacity:.3}
+.hd-l h1{font-size:22px;color:var(--a1);letter-spacing:4px;text-shadow:0 0 8px var(--a1)}
+.hd-l .sub{font-size:11px;color:var(--a2);margin-top:2px}
+#thm{background:rgba(0,0,0,.3);color:var(--a1);border:1px solid var(--b2);border-radius:4px;padding:4px 8px;
+font-family:inherit;font-size:11px;font-weight:bold;letter-spacing:1px;cursor:pointer}
+.st{display:flex;gap:8px;padding:8px 12px;background:var(--bg-stats);border-bottom:1px solid var(--b3);flex-shrink:0;position:relative;z-index:1}
+.sc{flex:1;text-align:center;padding:6px;border:1px solid var(--b2);border-radius:5px}
+.sc .n{font-size:22px;font-weight:bold;color:var(--a1)}
+.sc .l{font-size:10px;color:var(--a2);margin-top:2px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.pulse{display:inline-block;width:6px;height:6px;border-radius:50%;background:#22c55e;animation:pulse 2s ease-in-out infinite;vertical-align:middle;margin-right:4px}
+.tb{display:flex;border-bottom:1px solid var(--a2);flex-shrink:0;position:relative;z-index:1}
+.tb button{flex:1;padding:9px;text-align:center;cursor:pointer;color:var(--a2);border:none;background:none;font-family:inherit;font-size:13px;font-weight:bold;letter-spacing:1px}
+.tb button.a{color:var(--a1);border-bottom:2px solid var(--a1);background:rgba(236,72,153,.08)}
+.cn{flex:1;overflow-y:auto;padding:10px;position:relative;z-index:1}
 .pn{display:none}.pn.a{display:block}
-.det{background:rgba(45,27,105,.4);border:1px solid rgba(139,92,246,.25);border-radius:7px;padding:10px;margin-bottom:8px}
-.det .mac{color:#ec4899;font-weight:bold;font-size:14px}
-.det .nm{color:#c084fc;font-size:13px;margin-left:4px}
+.det{background:var(--bg-card);border:1px solid var(--b2);border-radius:7px;padding:10px;margin-bottom:8px;border-left:3px solid var(--a2)}
+.det.t-flock{border-left-color:var(--bl-flock)}.det.t-ring{border-left-color:var(--bl-ring)}
+.det.t-raven{border-left-color:var(--bl-raven)}.det.t-wifi{border-left-color:#22c55e}
+.det .mac{color:var(--a1);font-weight:bold;font-size:14px}
+.det .nm{color:var(--a3);font-size:13px;margin-left:4px}
 .det .inf{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;font-size:12px}
-.det .inf span{background:rgba(139,92,246,.15);padding:3px 6px;border-radius:4px}
+.det .inf span{background:var(--bg-tag);padding:3px 6px;border-radius:4px}
 .det .rv{background:rgba(239,68,68,.15)!important;color:#ef4444;font-weight:bold}
+.rp{background:var(--bg-card);border:1px solid var(--b2);border-radius:7px;margin-bottom:10px}
+.rp-h{padding:10px;cursor:pointer;color:var(--a1);font-weight:bold;font-size:13px;display:flex;justify-content:space-between;align-items:center}
+.rp-h .arr{display:inline-block;transition:transform .2s;font-size:10px}
+.rp-h.open .arr{transform:rotate(90deg)}
+.rp-ct{font-size:11px;color:var(--a2)}
+.rp-b{display:none;padding:0 10px 10px;text-align:center}
+.rp-b.open{display:block}
+#rC{max-width:100%;border-radius:7px}
+.rp-lg{margin-top:8px;font-size:11px;display:flex;justify-content:center;gap:12px;color:var(--t1)}
+.ch{background:var(--bg-card);border:1px solid var(--b2);border-radius:7px;margin-bottom:10px;overflow:hidden}
+.ch canvas{width:100%;display:block}
 .pg{margin-bottom:12px}
-.pg h3{color:#ec4899;font-size:14px;margin-bottom:4px;border-bottom:1px solid rgba(139,92,246,.19);padding-bottom:4px}
+.pg h3{color:var(--a1);font-size:14px;margin-bottom:4px;border-bottom:1px solid var(--b3);padding-bottom:4px}
 .pg .it{display:flex;flex-wrap:wrap;gap:4px;font-size:12px}
-.pg .it span{background:rgba(139,92,246,.15);padding:3px 6px;border-radius:4px;border:1px solid rgba(139,92,246,.12)}
-.btn{display:block;width:100%;padding:10px;margin-bottom:8px;background:#8b5cf6;color:#fff;border:none;border-radius:5px;cursor:pointer;font-family:inherit;font-size:14px;font-weight:bold}
-.btn:active{background:#ec4899}
+.pg .it span{background:var(--bg-tag);padding:3px 6px;border-radius:4px;border:1px solid var(--b3)}
+.btn{display:block;width:100%;padding:10px;margin-bottom:8px;background:var(--btn-bg);color:#fff;border:none;border-radius:5px;cursor:pointer;font-family:inherit;font-size:14px;font-weight:bold}
+.btn:active{background:var(--btn-act)}
 .btn.dng{background:#ef4444}
-.empty{text-align:center;color:rgba(139,92,246,.5);padding:28px;font-size:14px}
-.sep{border:none;border-top:1px solid rgba(139,92,246,.12);margin:12px 0}
-h4{color:#ec4899;font-size:14px;margin-bottom:8px}
+.empty{text-align:center;color:var(--t2);padding:28px;font-size:14px}
+.sep{border:none;border-top:1px solid var(--b3);margin:12px 0}
+h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 </style></head><body>
-<div class="hd"><h1>DANTIR</h1><div class="sub">Surveillance Counter-Watcher &bull; BLE + WiFi + GPS</div></div>
+<div class="hd">
+<div class="hd-l"><h1>DANTIR</h1><div class="sub" id="tagline"></div></div>
+<select id="thm" onchange="setTheme(this.value)">
+<option value="purple">PURPLE</option>
+<option value="tactical">TACTICAL</option>
+<option value="ithildin">ITHILDIN</option>
+</select>
+</div>
 <div class="st">
-<div class="sc"><div class="n" id="sT">0</div><div class="l">DETECTED</div></div>
+<div class="sc"><div class="n" id="sT">0</div><div class="l"><span class="pulse"></span>DETECTED</div></div>
 <div class="sc"><div class="n" id="sR">0</div><div class="l">RAVEN</div></div>
 <div class="sc"><div class="n" id="sB">ON</div><div class="l">BLE+WiFi</div></div>
 <div class="sc" onclick="reqGPS()" style="cursor:pointer"><div class="n" id="sG" style="font-size:14px">TAP</div><div class="l" id="sGL">GPS</div></div>
@@ -944,13 +983,19 @@ h4{color:#ec4899;font-size:14px;margin-bottom:8px}
 </div>
 <div class="cn">
 <div class="pn a" id="p0">
+<div class="rp">
+<div class="rp-h" onclick="togRadar()"><div><span class="arr" id="rArr">&#9654;</span> PROXIMITY RADAR</div><span class="rp-ct" id="rCt">0 devices</span></div>
+<div class="rp-b" id="rB"><canvas id="rC" width="280" height="280"></canvas>
+<div class="rp-lg"><span style="color:var(--bl-flock)">&#9679;</span>Flock <span style="color:var(--bl-ring)">&#9679;</span>Ring <span style="color:var(--bl-raven)">&#9679;</span>Raven <span style="color:var(--bl-other)">&#9679;</span>Other</div></div>
+</div>
+<div class="ch" id="chP" style="display:none"><canvas id="chC" height="60"></canvas></div>
 <div id="dL"><div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div></div>
 </div>
 <div class="pn" id="p1"><div id="hL"><div class="empty">Loading prior session...</div></div></div>
 <div class="pn" id="p2"><div id="pC">Loading patterns...</div></div>
 <div class="pn" id="p3">
 <h4>EXPORT DETECTIONS</h4>
-<p style="font-size:10px;color:#8b5cf6;margin-bottom:8px">Download current session to import into Flask dashboard</p>
+<p style="font-size:10px;color:var(--a2);margin-bottom:8px">Download current session data</p>
 <button class="btn" onclick="location.href='/api/export/json'">DOWNLOAD JSON</button>
 <button class="btn" onclick="location.href='/api/export/csv'">DOWNLOAD CSV</button>
 <button class="btn" onclick="location.href='/api/export/kml'" style="background:#22c55e">DOWNLOAD KML (GPS MAP)</button>
@@ -963,16 +1008,171 @@ h4{color:#ec4899;font-size:14px;margin-bottom:8px}
 </div>
 </div>
 <script>
-let D=[],H=[];
-function tab(i,el){document.querySelectorAll('.tb button').forEach(b=>b.classList.remove('a'));document.querySelectorAll('.pn').forEach(p=>p.classList.remove('a'));el.classList.add('a');document.getElementById('p'+i).classList.add('a');if(i===1&&!window._hL)loadHistory();if(i===2&&!window._pL)loadPat();}
-function refresh(){fetch('/api/detections').then(r=>r.json()).then(d=>{D=d;render();stats();}).catch(()=>{});}
-function render(){const el=document.getElementById('dL');if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>';return;}
-D.sort((a,b)=>b.last-a.last);el.innerHTML=D.map(card).join('');}
-function stats(){document.getElementById('sT').textContent=D.length;document.getElementById('sR').textContent=D.filter(d=>d.raven).length;
-fetch('/api/stats').then(r=>r.json()).then(s=>{let g=document.getElementById('sG'),gl=document.getElementById('sGL');if(s.gps_src==='hw'){g.textContent=s.gps_sats+'sat';g.style.color='#22c55e';gl.textContent='HW GPS';}else if(s.gps_src==='phone'){g.textContent=s.gps_tagged+'/'+s.total;g.style.color='#22c55e';gl.textContent='PHONE';}else if(s.gps_hw_detected){g.textContent=s.gps_sats+'sat';g.style.color='#facc15';gl.textContent='NO FIX';}else{g.textContent='TAP';g.style.color='#ef4444';gl.textContent='GPS';}}).catch(()=>{});}
-function card(d){return '<div class="det"><div class="mac">'+d.mac+(d.name?'<span class="nm">'+d.name+'</span>':'')+'</div><div class="inf"><span>RSSI: '+d.rssi+'</span><span>'+d.method+'</span><span style="color:#ec4899;font-weight:bold">&times;'+d.count+'</span>'+(d.raven?'<span class="rv">RAVEN '+d.fw+'</span>':'')+(d.gps?'<span style="color:#22c55e">&#9673; '+d.gps.lat.toFixed(5)+','+d.gps.lon.toFixed(5)+'</span>':'<span style="color:#666">no gps</span>')+'</div></div>';}
-function loadHistory(){fetch('/api/history').then(r=>r.json()).then(d=>{H=d;let el=document.getElementById('hL');if(!H.length){el.innerHTML='<div class="empty">No prior session data</div>';return;}
-H.sort((a,b)=>b.last-a.last);el.innerHTML='<div style="font-size:11px;color:#8b5cf6;margin-bottom:8px">'+H.length+' detections from prior session</div>'+H.map(card).join('');window._hL=1;}).catch(()=>{document.getElementById('hL').innerHTML='<div class="empty">No prior session data</div>';});}
+// === THEMES ===
+const TH={
+purple:{
+'--bg-body':'#0a0012','--bg-hdr':'#1a0033',
+'--bg-card':'linear-gradient(135deg,rgba(45,27,105,.5),rgba(30,15,80,.3))',
+'--bg-stats':'rgba(139,92,246,.08)','--bg-tag':'rgba(139,92,246,.15)',
+'--a1':'#ec4899','--a2':'#8b5cf6','--a3':'#c084fc',
+'--b1':'#ec4899','--b2':'rgba(139,92,246,.25)','--b3':'rgba(139,92,246,.19)',
+'--t1':'#e0e0e0','--t2':'rgba(139,92,246,.5)',
+'--grid':'rgba(236,72,153,.02)',
+'--rr':'rgba(139,92,246,.2)','--rs':'rgba(236,72,153,.4)',
+'--bl-flock':'#8b5cf6','--bl-ring':'#ef4444','--bl-raven':'#dc2626','--bl-other':'#6b7280',
+'--btn-bg':'#8b5cf6','--btn-act':'#ec4899'},
+tactical:{
+'--bg-body':'#0a0f0a','--bg-hdr':'#0f1a0f',
+'--bg-card':'linear-gradient(135deg,rgba(20,40,20,.6),rgba(15,30,15,.3))',
+'--bg-stats':'rgba(34,197,94,.05)','--bg-tag':'rgba(34,197,94,.15)',
+'--a1':'#22c55e','--a2':'#facc15','--a3':'#84cc16',
+'--b1':'#22c55e','--b2':'rgba(34,197,94,.3)','--b3':'rgba(34,197,94,.15)',
+'--t1':'#d4f4dd','--t2':'rgba(34,197,94,.4)',
+'--grid':'rgba(34,197,94,.03)',
+'--rr':'rgba(34,197,94,.25)','--rs':'rgba(250,204,21,.4)',
+'--bl-flock':'#84cc16','--bl-ring':'#ef4444','--bl-raven':'#dc2626','--bl-other':'#a3a3a3',
+'--btn-bg':'#16a34a','--btn-act':'#facc15'},
+ithildin:{
+'--bg-body':'#080811','--bg-hdr':'#0f0f1f',
+'--bg-card':'linear-gradient(135deg,rgba(30,41,59,.5),rgba(20,30,48,.3))',
+'--bg-stats':'rgba(148,163,184,.06)','--bg-tag':'rgba(148,163,184,.12)',
+'--a1':'#cbd5e1','--a2':'#60a5fa','--a3':'#93c5fd',
+'--b1':'#94a3b8','--b2':'rgba(148,163,184,.3)','--b3':'rgba(148,163,184,.12)',
+'--t1':'#f1f5f9','--t2':'rgba(148,163,184,.4)',
+'--grid':'rgba(96,165,250,.02)',
+'--rr':'rgba(148,163,184,.2)','--rs':'rgba(96,165,250,.35)',
+'--bl-flock':'#60a5fa','--bl-ring':'#ef4444','--bl-raven':'#dc2626','--bl-other':'#94a3b8',
+'--btn-bg':'#3b82f6','--btn-act':'#60a5fa'}
+};
+function setTheme(n){const t=TH[n];if(!t)return;const r=document.documentElement;
+for(const[k,v]of Object.entries(t))r.style.setProperty(k,v);
+try{localStorage.setItem('dantir_theme',n)}catch(e){}}
+// === TAGLINES ===
+const TAGS=['Surveillance Counter-Watcher &bull; Go Flock Yourself',
+'Surveillance Counter-Watcher &bull; Privacy is a Right',
+'Surveillance Counter-Watcher &bull; BLE + WiFi + GPS',
+'Surveillance Counter-Watcher &bull; dan (against) + tir (to watch)'];
+// === STATE ===
+let D=[],H=[],_dGPS=null,_rO=false,_rA=0;
+// === TABS ===
+function tab(i,el){document.querySelectorAll('.tb button').forEach(b=>b.classList.remove('a'));
+document.querySelectorAll('.pn').forEach(p=>p.classList.remove('a'));
+el.classList.add('a');document.getElementById('p'+i).classList.add('a');
+if(i===1&&!window._hL)loadHistory();if(i===2&&!window._pL)loadPat();}
+// === REFRESH ===
+function refresh(){fetch('/api/detections').then(r=>r.json()).then(d=>{D=d;render();stats();drawChart();}).catch(()=>{});}
+// === DETECT TYPE ===
+function dtype(d){if(d.raven)return'raven';
+const m=d.method||'',n=(d.name||'').toLowerCase();
+if(m==='wifi_beacon'||m==='wifi_probe')return'wifi';
+if(n.indexOf('ring')>=0||n.indexOf('blink')>=0||m==='ble_mfr_id')return'ring';
+return'flock';}
+// === RENDER LIST ===
+function render(){const el=document.getElementById('dL');
+if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>';return;}
+D.sort((a,b)=>b.last-a.last);el.innerHTML=D.map(card).join('');
+document.getElementById('rCt').textContent=D.length+' device'+(D.length!==1?'s':'');}
+function card(d){const t=dtype(d);
+return '<div class="det t-'+t+'"><div class="mac">'+d.mac+(d.name?'<span class="nm">'+d.name+'</span>':'')+'</div><div class="inf">'
++'<span>RSSI: '+d.rssi+'</span><span>'+d.method+'</span>'
++'<span style="color:var(--a1);font-weight:bold">&times;'+d.count+'</span>'
++(d.raven?'<span class="rv">RAVEN '+d.fw+'</span>':'')
++(d.gps?'<span style="color:#22c55e">&#9673; '+d.gps.lat.toFixed(5)+','+d.gps.lon.toFixed(5)+'</span>':'<span style="color:#666">no gps</span>')
++'</div></div>';}
+// === STATS ===
+function stats(){document.getElementById('sT').textContent=D.length;
+document.getElementById('sR').textContent=D.filter(d=>d.raven).length;
+fetch('/api/stats').then(r=>r.json()).then(s=>{
+let g=document.getElementById('sG'),gl=document.getElementById('sGL');
+if(s.gps_src==='hw'){g.textContent=s.gps_sats+'sat';g.style.color='#22c55e';gl.textContent='HW GPS';}
+else if(s.gps_src==='phone'){g.textContent=s.gps_tagged+'/'+s.total;g.style.color='#22c55e';gl.textContent='PHONE';}
+else if(s.gps_hw_detected){g.textContent=s.gps_sats+'sat';g.style.color='#facc15';gl.textContent='NO FIX';}
+else{g.textContent='TAP';g.style.color='#ef4444';gl.textContent='GPS';}
+if(s.device_lat&&s.device_lon)_dGPS={lat:s.device_lat,lon:s.device_lon};else _dGPS=null;
+}).catch(()=>{});}
+// === RADAR ===
+function togRadar(){_rO=!_rO;
+document.getElementById('rB').classList.toggle('open',_rO);
+document.querySelector('.rp-h').classList.toggle('open',_rO);
+document.getElementById('rArr').innerHTML=_rO?'&#9660;':'&#9654;';}
+function macHash(m){let h=0;for(let i=0;i<m.length;i++){h=((h<<5)-h)+m.charCodeAt(i);h|=0;}return Math.abs(h);}
+function bearing(la1,lo1,la2,lo2){const r=Math.PI/180,dL=(lo2-lo1)*r;
+const y=Math.sin(dL)*Math.cos(la2*r);
+const x=Math.cos(la1*r)*Math.sin(la2*r)-Math.sin(la1*r)*Math.cos(la2*r)*Math.cos(dL);
+return Math.atan2(y,x);}
+function drawRadar(){if(!_rO)return;const c=document.getElementById('rC');if(!c)return;
+const ctx=c.getContext('2d'),w=c.width,h=c.height,cx=w/2,cy=h/2,mR=Math.min(w,h)/2-20;
+const cs=getComputedStyle(document.documentElement);
+ctx.clearRect(0,0,w,h);
+// rings
+ctx.strokeStyle=cs.getPropertyValue('--rr').trim();ctx.lineWidth=1;
+[.25,.5,.75,1].forEach(r=>{ctx.beginPath();ctx.arc(cx,cy,mR*r,0,Math.PI*2);ctx.stroke();});
+// crosshairs
+ctx.beginPath();ctx.moveTo(cx,cy-mR);ctx.lineTo(cx,cy+mR);ctx.moveTo(cx-mR,cy);ctx.lineTo(cx+mR,cy);ctx.stroke();
+// RSSI labels
+ctx.fillStyle=cs.getPropertyValue('--t2').trim();ctx.font='9px monospace';ctx.textAlign='center';
+ctx.fillText('-30',cx+12,cy-mR*.25+3);ctx.fillText('-50',cx+12,cy-mR*.5+3);
+ctx.fillText('-70',cx+12,cy-mR*.75+3);ctx.fillText('-90',cx+12,cy-mR+3);
+// sweep
+ctx.strokeStyle=cs.getPropertyValue('--rs').trim();ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx,cy);
+ctx.lineTo(cx+mR*Math.cos(_rA),cy+mR*Math.sin(_rA));ctx.stroke();
+// sweep trail
+const grd=ctx.createConicGradient(_rA-0.5,cx,cy);
+grd.addColorStop(0,'transparent');grd.addColorStop(0.08,cs.getPropertyValue('--rs').trim());
+grd.addColorStop(0.1,'transparent');
+ctx.fillStyle=grd;ctx.beginPath();ctx.arc(cx,cy,mR,0,Math.PI*2);ctx.fill();
+// blips
+D.forEach(det=>{
+const rssi=Math.abs(det.rssi),dist=Math.max(0,Math.min(1,(rssi-30)/60))*mR;
+let ang;
+if(_dGPS&&det.gps)ang=bearing(_dGPS.lat,_dGPS.lon,det.gps.lat,det.gps.lon);
+else ang=(macHash(det.mac)%628)/100;
+const bx=cx+dist*Math.cos(ang),by=cy+dist*Math.sin(ang);
+const t=dtype(det);let col=cs.getPropertyValue('--bl-other').trim();
+if(t==='raven')col=cs.getPropertyValue('--bl-raven').trim();
+else if(t==='ring')col=cs.getPropertyValue('--bl-ring').trim();
+else if(t==='flock')col=cs.getPropertyValue('--bl-flock').trim();
+else if(t==='wifi')col='#22c55e';
+ctx.fillStyle=col;ctx.globalAlpha=1;ctx.beginPath();ctx.arc(bx,by,4,0,Math.PI*2);ctx.fill();
+// glow for high count
+if(det.count>5){ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.globalAlpha=.35;
+ctx.beginPath();ctx.arc(bx,by,7,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;}
+});
+_rA+=0.03;if(_rA>Math.PI*2)_rA=0;}
+// === CHART ===
+function drawChart(){const cp=document.getElementById('chP'),cc=document.getElementById('chC');
+if(!D.length){cp.style.display='none';return;}
+cp.style.display='block';
+const sorted=[...D].sort((a,b)=>b.rssi-a.rssi);const n=Math.min(sorted.length,8);
+const cs=getComputedStyle(document.documentElement);
+cc.width=cp.offsetWidth||300;cc.height=Math.max(60,n*18+10);
+const ctx=cc.getContext('2d'),w=cc.width,h=cc.height,bh=12,gap=4,lw=90;
+for(let i=0;i<n;i++){
+const d=sorted[i],y=i*(bh+gap)+5;
+const rssi=Math.abs(d.rssi),pct=Math.max(0,Math.min(1,(90-rssi)/60));
+const bw=pct*(w-lw-10);
+const t=dtype(d);let col=cs.getPropertyValue('--bl-other').trim();
+if(t==='raven')col=cs.getPropertyValue('--bl-raven').trim();
+else if(t==='ring')col=cs.getPropertyValue('--bl-ring').trim();
+else if(t==='flock')col=cs.getPropertyValue('--bl-flock').trim();
+else if(t==='wifi')col='#22c55e';
+// label
+ctx.fillStyle=cs.getPropertyValue('--t1').trim();ctx.font='10px monospace';ctx.textAlign='right';
+const lbl=d.name?d.name.substring(0,10):d.mac.substring(9);
+ctx.fillText(lbl,lw-4,y+bh-2);
+// bar
+ctx.fillStyle=col;ctx.globalAlpha=.8;
+ctx.fillRect(lw,y,bw,bh);ctx.globalAlpha=1;
+// rssi label
+ctx.fillStyle=cs.getPropertyValue('--t2').trim();ctx.textAlign='left';ctx.font='9px monospace';
+ctx.fillText(d.rssi+'dBm',lw+bw+4,y+bh-2);
+}}
+// === HISTORY ===
+function loadHistory(){fetch('/api/history').then(r=>r.json()).then(d=>{H=d;let el=document.getElementById('hL');
+if(!H.length){el.innerHTML='<div class="empty">No prior session data</div>';return;}
+H.sort((a,b)=>b.last-a.last);el.innerHTML='<div style="font-size:11px;color:var(--a2);margin-bottom:8px">'+H.length+' detections from prior session</div>'+H.map(card).join('');
+window._hL=1;}).catch(()=>{document.getElementById('hL').innerHTML='<div class="empty">No prior session data</div>';});}
+// === PATTERNS ===
 function loadPat(){fetch('/api/patterns').then(r=>r.json()).then(p=>{let h='';
 h+='<div class="pg"><h3>BLE MAC Prefixes ('+p.ble_macs.length+')</h3><div class="it">'+p.ble_macs.map(m=>'<span>'+m+'</span>').join('')+'</div></div>';
 h+='<div class="pg"><h3>WiFi MAC Prefixes ('+p.wifi_macs.length+')</h3><div class="it">'+p.wifi_macs.map(m=>'<span>'+m+'</span>').join('')+'</div></div>';
@@ -980,11 +1180,7 @@ h+='<div class="pg"><h3>BLE Device Names ('+p.names.length+')</h3><div class="it
 h+='<div class="pg"><h3>BLE Manufacturer IDs ('+p.mfr.length+')</h3><div class="it">'+p.mfr.map(m=>'<span>0x'+m.toString(16).toUpperCase().padStart(4,'0')+'</span>').join('')+'</div></div>';
 h+='<div class="pg"><h3>Raven UUIDs ('+p.raven.length+')</h3><div class="it">'+p.raven.map(u=>'<span style="font-size:8px">'+u+'</span>').join('')+'</div></div>';
 document.getElementById('pC').innerHTML=h;window._pL=1;}).catch(()=>{});}
-// GPS from phone -> ESP32 (wardriving)
-// NOTE: Geolocation API needs secure context (HTTPS) on most browsers.
-// HTTP works on: Android Chrome (local IPs), some Android browsers.
-// Won't work on: iOS Safari (needs HTTPS always).
-// We only request on user tap (gesture) for best permission prompt chance.
+// === GPS ===
 let _gW=null,_gOk=false,_gTried=false;
 function sendGPS(p){_gOk=true;let g=document.getElementById('sG');g.textContent='OK';g.style.color='#22c55e';
 fetch('/api/gps?lat='+p.coords.latitude+'&lon='+p.coords.longitude+'&acc='+(p.coords.accuracy||0)).catch(()=>{});}
@@ -1001,7 +1197,11 @@ function reqGPS(){if(!navigator.geolocation){alert('GPS not available in this br
 if(_gOk){return;}
 if(!window.isSecureContext){alert('GPS requires a secure context (HTTPS). This HTTP page may not get GPS permission.\\n\\nAndroid Chrome: try chrome://flags and enable "Insecure origins treated as secure", add http://192.168.4.1\\n\\niPhone: GPS will not work over HTTP.');}
 startGPS();_gTried=true;}
+// === INIT ===
+document.getElementById('tagline').innerHTML=TAGS[Math.floor(Math.random()*TAGS.length)];
+(function(){const s=localStorage.getItem('dantir_theme')||'purple';document.getElementById('thm').value=s;if(s!=='purple')setTheme(s);})();
 refresh();setInterval(refresh,2500);
+function rLoop(){drawRadar();requestAnimationFrame(rLoop);}rLoop();
 </script></body></html>
 )rawliteral";
 
@@ -1035,18 +1235,20 @@ static void fySetupServer() {
         const char* gpsSrc = "none";
         if (fyGPSIsHardware && fyHWGPSFix) gpsSrc = "hw";
         else if (fyGPSIsFresh()) gpsSrc = "phone";
-        char buf[384];
+        char buf[448];
         snprintf(buf, sizeof(buf),
             "{\"total\":%d,\"raven\":%d,\"ble\":\"active\",\"wifi\":\"active\","
             "\"wifi_det\":%d,"
             "\"gps_valid\":%s,\"gps_age\":%lu,\"gps_tagged\":%d,"
-            "\"gps_src\":\"%s\",\"gps_sats\":%d,\"gps_hw_detected\":%s}",
+            "\"gps_src\":\"%s\",\"gps_sats\":%d,\"gps_hw_detected\":%s,"
+            "\"device_lat\":%.8f,\"device_lon\":%.8f}",
             fyDetCount, raven, fyWifiDetCount,
             fyGPSIsFresh() ? "true" : "false",
             fyGPSValid ? (millis() - fyGPSLastUpdate) : 0UL,
             withGPS,
             gpsSrc, fyHWGPSSats,
-            fyHWGPSDetected ? "true" : "false");
+            fyHWGPSDetected ? "true" : "false",
+            fyGPSLat, fyGPSLon);
         r->send(200, "application/json", buf);
     });
 
