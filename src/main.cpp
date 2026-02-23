@@ -66,6 +66,18 @@
 #define FY_NEOPIXEL_BRIGHTNESS 50
 #define FY_NEOPIXEL_DETECTION_BRIGHTNESS 200
 
+// Battery monitoring
+// XIAO ESP32-S3 has no dedicated battery ADC pin. To enable battery monitoring:
+//   1. Wire a voltage divider (2x 200K resistors) from BAT+ to an ADC pin
+//   2. Set BATTERY_ADC_PIN to that GPIO number (e.g. 1 for A0/D0)
+//   3. The code reads voltage, applies divider ratio, maps to 0-100%
+// Set to -1 to disable (no hardware voltage divider connected)
+#define BATTERY_ADC_PIN -1       // -1 = disabled, set to GPIO with voltage divider
+#define BATTERY_SAMPLES 16       // ADC samples to average (noise reduction)
+#define BATTERY_FULL_V 4.2f      // LiPo full charge voltage
+#define BATTERY_EMPTY_V 3.0f     // LiPo cutoff voltage
+#define BATTERY_DIVIDER 2.0f     // Voltage divider ratio (2x 200K = /2)
+
 // BLE scanning
 #define BLE_SCAN_DURATION 2      // seconds per scan
 #define BLE_SCAN_INTERVAL 3000   // ms between scans
@@ -166,11 +178,17 @@ struct FYDetection {
     int count;
     bool isRaven;
     char ravenFW[16];
-    // GPS from phone (wardriving)
+    // GPS from phone (wardriving) — first detection position
     double gpsLat;
     double gpsLon;
     float gpsAcc;
     bool hasGPS;
+    // Peak-RSSI GPS — position at strongest signal (closest approach to device)
+    int bestRSSI;         // Strongest (least negative) RSSI seen
+    double bestGPSLat;
+    double bestGPSLon;
+    float bestGPSAcc;
+    bool hasBestGPS;
 };
 
 static FYDetection fyDet[MAX_DETECTIONS];
@@ -220,6 +238,31 @@ static bool fyGPSIsHardware = false;     // Current GPS source is hardware
 static unsigned long fyLastSave = 0;
 static int fyLastSaveCount = 0;  // Track changes to avoid unnecessary writes
 static bool fySpiffsReady = false;
+
+// Battery monitoring
+static int fyBatteryPercent = -1;    // -1 = no ADC available
+static float fyBatteryVoltage = 0;
+static unsigned long fyLastBattRead = 0;
+#define BATTERY_READ_INTERVAL 10000  // Read every 10 seconds
+
+static void fyReadBattery() {
+#if BATTERY_ADC_PIN >= 0
+    if (millis() - fyLastBattRead < BATTERY_READ_INTERVAL && fyLastBattRead > 0) return;
+    fyLastBattRead = millis();
+    uint32_t raw = 0;
+    for (int i = 0; i < BATTERY_SAMPLES; i++) {
+        raw += analogReadMilliVolts(BATTERY_ADC_PIN);
+    }
+    float mv = (float)raw / BATTERY_SAMPLES;
+    fyBatteryVoltage = mv * BATTERY_DIVIDER / 1000.0f;
+    int pct = (int)((fyBatteryVoltage - BATTERY_EMPTY_V) / (BATTERY_FULL_V - BATTERY_EMPTY_V) * 100.0f);
+    if (pct > 100) pct = 100;
+    if (pct < 0) pct = 0;
+    fyBatteryPercent = pct;
+#else
+    fyBatteryPercent = -1;
+#endif
+}
 
 // ============================================================================
 // AUDIO SYSTEM
@@ -612,6 +655,14 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             }
             // Update GPS on every re-sighting (captures movement)
             fyAttachGPS(fyDet[i]);
+            // Track peak RSSI — strongest signal = closest approach to device
+            if (rssi > fyDet[i].bestRSSI && fyGPSIsFresh()) {
+                fyDet[i].bestRSSI = rssi;
+                fyDet[i].bestGPSLat = fyGPSLat;
+                fyDet[i].bestGPSLon = fyGPSLon;
+                fyDet[i].bestGPSAcc = fyGPSAcc;
+                fyDet[i].hasBestGPS = true;
+            }
             xSemaphoreGive(fyMutex);
             return i;
         }
@@ -629,14 +680,22 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             }
         }
         d.rssi = rssi;
+        d.bestRSSI = rssi;  // First sighting = initial best
         strncpy(d.method, method, sizeof(d.method) - 1);
         d.firstSeen = millis();
         d.lastSeen = millis();
         d.count = 1;
         d.isRaven = isRaven;
         strncpy(d.ravenFW, ravenFW ? ravenFW : "", sizeof(d.ravenFW) - 1);
-        // Attach GPS from phone
+        // Attach GPS from phone (first-seen position)
         fyAttachGPS(d);
+        // Initialize best GPS to first-seen GPS
+        if (d.hasGPS) {
+            d.bestGPSLat = d.gpsLat;
+            d.bestGPSLon = d.gpsLon;
+            d.bestGPSAcc = d.gpsAcc;
+            d.hasBestGPS = true;
+        }
         int idx = fyDetCount++;
         xSemaphoreGive(fyMutex);
         return idx;
@@ -765,10 +824,16 @@ static void writeDetectionsJSON(AsyncResponseStream *resp) {
                 fyDet[i].mac, fyDet[i].name, fyDet[i].rssi, fyDet[i].method,
                 fyDet[i].firstSeen, fyDet[i].lastSeen, fyDet[i].count,
                 fyDet[i].isRaven ? "true" : "false", fyDet[i].ravenFW);
-            // Append GPS if present
+            // Append GPS if present (first-seen position)
             if (fyDet[i].hasGPS) {
                 resp->printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
                     fyDet[i].gpsLat, fyDet[i].gpsLon, fyDet[i].gpsAcc);
+            }
+            // Append best GPS (peak-RSSI = closest approach position)
+            if (fyDet[i].hasBestGPS) {
+                resp->printf(",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
+                    fyDet[i].bestRSSI,
+                    fyDet[i].bestGPSLat, fyDet[i].bestGPSLon, fyDet[i].bestGPSAcc);
             }
             resp->print("}");
         }
@@ -800,6 +865,10 @@ static void fySaveSession() {
                  d.isRaven ? "true" : "false", d.ravenFW);
         if (d.hasGPS) {
             f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}", d.gpsLat, d.gpsLon, d.gpsAcc);
+        }
+        if (d.hasBestGPS) {
+            f.printf(",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
+                d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
         }
         f.print("}");
     }
@@ -866,7 +935,11 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
     if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
         for (int i = 0; i < fyDetCount; i++) {
             FYDetection& d = fyDet[i];
-            if (!d.hasGPS) continue;  // Skip detections without GPS
+            if (!d.hasGPS && !d.hasBestGPS) continue;  // Skip detections without any GPS
+            // Use best GPS (closest approach) if available, else first-seen GPS
+            double pinLat = d.hasBestGPS ? d.bestGPSLat : d.gpsLat;
+            double pinLon = d.hasBestGPS ? d.bestGPSLon : d.gpsLon;
+            float pinAcc = d.hasBestGPS ? d.bestGPSAcc : d.gpsAcc;
             resp->print("<Placemark>\n");
             resp->printf("<name>%s</name>\n", d.mac);
             resp->printf("<styleUrl>#%s</styleUrl>\n", d.isRaven ? "raven" : "det");
@@ -874,13 +947,14 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
             if (d.name[0]) resp->printf("<b>Name:</b> %s<br/>", d.name);
             resp->printf("<b>Method:</b> %s<br/>"
                          "<b>RSSI:</b> %d dBm<br/>"
+                         "<b>Best RSSI:</b> %d dBm<br/>"
                          "<b>Count:</b> %d<br/>",
-                         d.method, d.rssi, d.count);
+                         d.method, d.rssi, d.hasBestGPS ? d.bestRSSI : d.rssi, d.count);
             if (d.isRaven) resp->printf("<b>Raven FW:</b> %s<br/>", d.ravenFW);
-            resp->printf("<b>Accuracy:</b> %.1f m", d.gpsAcc);
+            resp->printf("<b>Accuracy:</b> %.1f m", pinAcc);
             resp->print("]]></description>\n");
             resp->printf("<Point><coordinates>%.8f,%.8f,0</coordinates></Point>\n",
-                         d.gpsLon, d.gpsLat);
+                         pinLon, pinLat);
             resp->print("</Placemark>\n");
         }
         xSemaphoreGive(fyMutex);
@@ -974,6 +1048,7 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 <div class="sc"><div class="n" id="sR">0</div><div class="l">RAVEN</div></div>
 <div class="sc"><div class="n" id="sB">ON</div><div class="l">BLE+WiFi</div></div>
 <div class="sc" onclick="reqGPS()" style="cursor:pointer"><div class="n" id="sG" style="font-size:14px">TAP</div><div class="l" id="sGL">GPS</div></div>
+<div class="sc"><div class="n" id="sBat" style="font-size:12px">--</div><div class="l" id="sBatL">UPTIME</div></div>
 </div>
 <div class="tb">
 <button class="a" onclick="tab(0,this)">LIVE</button>
@@ -1077,7 +1152,7 @@ return '<div class="det t-'+t+'"><div class="mac">'+d.mac+(d.name?'<span class="
 +'<span>RSSI: '+d.rssi+'</span><span>'+d.method+'</span>'
 +'<span style="color:var(--a1);font-weight:bold">&times;'+d.count+'</span>'
 +(d.raven?'<span class="rv">RAVEN '+d.fw+'</span>':'')
-+(d.gps?'<span style="color:#22c55e">&#9673; '+d.gps.lat.toFixed(5)+','+d.gps.lon.toFixed(5)+'</span>':'<span style="color:#666">no gps</span>')
++(d.best_gps?'<span style="color:#22c55e" title="Peak RSSI: '+d.best_rssi+'dBm">&#9673; '+d.best_gps.lat.toFixed(5)+','+d.best_gps.lon.toFixed(5)+'</span>':d.gps?'<span style="color:#a3e635">&#9673; '+d.gps.lat.toFixed(5)+','+d.gps.lon.toFixed(5)+'</span>':'<span style="color:#666">no gps</span>')
 +'</div></div>';}
 // === STATS ===
 function stats(){document.getElementById('sT').textContent=D.length;
@@ -1089,6 +1164,10 @@ else if(s.gps_src==='phone'){g.textContent=s.gps_tagged+'/'+s.total;g.style.colo
 else if(s.gps_hw_detected){g.textContent=s.gps_sats+'sat';g.style.color='#facc15';gl.textContent='NO FIX';}
 else{g.textContent='TAP';g.style.color='#ef4444';gl.textContent='GPS';}
 if(s.device_lat&&s.device_lon)_dGPS={lat:s.device_lat,lon:s.device_lon};else _dGPS=null;
+let bt=document.getElementById('sBat'),bl=document.getElementById('sBatL');
+if(s.batt_pct>=0){bt.textContent=s.batt_pct+'%';bl.textContent=s.batt_v.toFixed(1)+'V';
+bt.style.color=s.batt_pct>20?'#22c55e':s.batt_pct>10?'#facc15':'#ef4444';}
+else{bt.textContent=s.uptime;bl.textContent='UPTIME';}
 }).catch(()=>{});}
 // === RADAR ===
 function togRadar(){_rO=!_rO;
@@ -1124,8 +1203,8 @@ ctx.fillStyle=grd;ctx.beginPath();ctx.arc(cx,cy,mR,0,Math.PI*2);ctx.fill();
 // blips
 D.forEach(det=>{
 const rssi=Math.abs(det.rssi),dist=Math.max(0,Math.min(1,(rssi-30)/60))*mR;
-let ang;
-if(_dGPS&&det.gps)ang=bearing(_dGPS.lat,_dGPS.lon,det.gps.lat,det.gps.lon);
+let ang;const dg=det.best_gps||det.gps;
+if(_dGPS&&dg)ang=bearing(_dGPS.lat,_dGPS.lon,dg.lat,dg.lon);
 else ang=(macHash(det.mac)%628)/100;
 const bx=cx+dist*Math.cos(ang),by=cy+dist*Math.sin(ang);
 const t=dtype(det);let col=cs.getPropertyValue('--bl-other').trim();
@@ -1235,20 +1314,26 @@ static void fySetupServer() {
         const char* gpsSrc = "none";
         if (fyGPSIsHardware && fyHWGPSFix) gpsSrc = "hw";
         else if (fyGPSIsFresh()) gpsSrc = "phone";
-        char buf[448];
+        unsigned long upSec = millis() / 1000;
+        int upH = upSec / 3600, upM = (upSec % 3600) / 60;
+        char buf[512];
         snprintf(buf, sizeof(buf),
             "{\"total\":%d,\"raven\":%d,\"ble\":\"active\",\"wifi\":\"active\","
             "\"wifi_det\":%d,"
             "\"gps_valid\":%s,\"gps_age\":%lu,\"gps_tagged\":%d,"
             "\"gps_src\":\"%s\",\"gps_sats\":%d,\"gps_hw_detected\":%s,"
-            "\"device_lat\":%.8f,\"device_lon\":%.8f}",
+            "\"device_lat\":%.8f,\"device_lon\":%.8f,"
+            "\"batt_pct\":%d,\"batt_v\":%.2f,"
+            "\"uptime\":\"%dh%02dm\"}",
             fyDetCount, raven, fyWifiDetCount,
             fyGPSIsFresh() ? "true" : "false",
             fyGPSValid ? (millis() - fyGPSLastUpdate) : 0UL,
             withGPS,
             gpsSrc, fyHWGPSSats,
             fyHWGPSDetected ? "true" : "false",
-            fyGPSLat, fyGPSLon);
+            fyGPSLat, fyGPSLon,
+            fyBatteryPercent, fyBatteryVoltage,
+            upH, upM);
         r->send(200, "application/json", buf);
     });
 
@@ -1315,21 +1400,23 @@ static void fySetupServer() {
     fyServer.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *r) {
         AsyncResponseStream *resp = r->beginResponseStream("text/csv");
         resp->addHeader("Content-Disposition", "attachment; filename=\"dantir_detections.csv\"");
-        resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy");
+        resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy,best_rssi,best_latitude,best_longitude,best_gps_accuracy");
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             for (int i = 0; i < fyDetCount; i++) {
                 FYDetection& d = fyDet[i];
+                resp->printf("\"%s\",\"%s\",%d,\"%s\",%lu,%lu,%d,%s,\"%s\"",
+                    d.mac, d.name, d.rssi, d.method,
+                    d.firstSeen, d.lastSeen, d.count,
+                    d.isRaven ? "true" : "false", d.ravenFW);
                 if (d.hasGPS) {
-                    resp->printf("\"%s\",\"%s\",%d,\"%s\",%lu,%lu,%d,%s,\"%s\",%.8f,%.8f,%.1f\n",
-                        d.mac, d.name, d.rssi, d.method,
-                        d.firstSeen, d.lastSeen, d.count,
-                        d.isRaven ? "true" : "false", d.ravenFW,
-                        d.gpsLat, d.gpsLon, d.gpsAcc);
+                    resp->printf(",%.8f,%.8f,%.1f", d.gpsLat, d.gpsLon, d.gpsAcc);
                 } else {
-                    resp->printf("\"%s\",\"%s\",%d,\"%s\",%lu,%lu,%d,%s,\"%s\",,,\n",
-                        d.mac, d.name, d.rssi, d.method,
-                        d.firstSeen, d.lastSeen, d.count,
-                        d.isRaven ? "true" : "false", d.ravenFW);
+                    resp->print(",,,");
+                }
+                if (d.hasBestGPS) {
+                    resp->printf(",%d,%.8f,%.8f,%.1f\n", d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
+                } else {
+                    resp->print(",,,\n");  // trailing newline included
                 }
             }
             xSemaphoreGive(fyMutex);
@@ -1395,21 +1482,27 @@ static void fySetupServer() {
         if (!err && doc.is<JsonArray>()) {
             int placed = 0;
             for (JsonObject d : doc.as<JsonArray>()) {
+                // Prefer best_gps (peak RSSI = closest approach), fall back to first-seen gps
+                JsonObject bgps = d["best_gps"];
                 JsonObject gps = d["gps"];
-                if (!gps || !gps.containsKey("lat")) continue;
+                JsonObject pinGPS = (bgps && bgps["lat"]) ? bgps : gps;
+                if (!pinGPS || !pinGPS["lat"]) continue;
                 bool isRaven = d["raven"] | false;
                 resp->printf("<Placemark><name>%s</name>\n", d["mac"] | "?");
                 resp->printf("<styleUrl>#%s</styleUrl>\n", isRaven ? "raven" : "det");
                 resp->print("<description><![CDATA[");
                 if (d["name"].is<const char*>() && strlen(d["name"] | "") > 0)
                     resp->printf("<b>Name:</b> %s<br/>", d["name"] | "");
-                resp->printf("<b>Method:</b> %s<br/><b>RSSI:</b> %d<br/><b>Count:</b> %d",
-                    d["method"] | "?", d["rssi"] | 0, d["count"] | 1);
+                resp->printf("<b>Method:</b> %s<br/><b>RSSI:</b> %d<br/>",
+                    d["method"] | "?", d["rssi"] | 0);
+                if (d["best_rssi"])
+                    resp->printf("<b>Best RSSI:</b> %d<br/>", d["best_rssi"] | 0);
+                resp->printf("<b>Count:</b> %d", d["count"] | 1);
                 if (isRaven && d["fw"].is<const char*>())
                     resp->printf("<br/><b>Raven FW:</b> %s", d["fw"] | "");
                 resp->print("]]></description>\n");
                 resp->printf("<Point><coordinates>%.8f,%.8f,0</coordinates></Point>\n",
-                    (double)(gps["lon"] | 0.0), (double)(gps["lat"] | 0.0));
+                    (double)(pinGPS["lon"] | 0.0), (double)(pinGPS["lat"] | 0.0));
                 resp->print("</Placemark>\n");
                 placed++;
             }
@@ -1486,10 +1579,14 @@ void setup() {
         printf("[DANTIR] SPIFFS init failed - no persistence\n");
     }
 
+    // Initialize battery monitoring
+    fyReadBattery();
+
     printf("\n========================================\n");
     printf("  DANTIR Surveillance Counter-Watcher\n");
     printf("  Buzzer: %s\n", fyBuzzerOn ? "ON" : "OFF");
     printf("  GPS: auto-detect (L76K on D6/D7)\n");
+    printf("  Battery ADC: %s\n", BATTERY_ADC_PIN >= 0 ? "enabled" : "disabled (no voltage divider)");
     printf("========================================\n");
 
     // Init BLE scanner FIRST -- start scanning immediately
@@ -1539,6 +1636,7 @@ void setup() {
 void loop() {
     fyProcessHardwareGPS();
     fyUpdatePixel();
+    fyReadBattery();
 
     // BLE scanning cycle
     if (millis() - fyLastBleScan >= BLE_SCAN_INTERVAL && !fyBLEScan->isScanning()) {
