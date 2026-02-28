@@ -103,19 +103,61 @@ static const char* ble_mac_prefixes[] = {
     "74:4c:a1", "08:3a:88", "9c:2f:9d", "94:08:53", "e4:aa:ea"
 };
 
+// ============================================================================
+// DETECTION CATEGORIES
+// ============================================================================
+// Each detection is tagged with a category for differentiated alerts.
+// Categories map to Morse code letters for buzzer/haptic patterns:
+//   F (··-·) = Flock/ALPR    G (--·)  = Glasses/recording
+//   T (-)    = Tracker        L (·-··) = Law enforcement
+//   R (·-·)  = Ring/consumer  S (···)  = Surveillance cameras
+//   V (···-) = Raven          W (·--)  = WiFi detection
+
 // BLE device name patterns (matched case-insensitive substring)
-static const char* device_name_patterns[] = {
-    "FS Ext Battery",
-    "Penguin",
-    "Flock",
-    "Pigvision",
-    "Ring"           // Ring cameras/doorbells during BLE setup
+struct NameEntry {
+    const char* pattern;
+    const char* category;
 };
 
-// BLE Manufacturer Company IDs
-static const uint16_t ble_manufacturer_ids[] = {
-    0x09C8,  // XUNTONG — Flock Safety (via wgreenberg/flock-you)
-    0x0171   // Amazon — Ring doorbells, Echo, security devices
+static const NameEntry device_name_entries[] = {
+    // Flock Safety
+    {"FS Ext Battery", "flock"},
+    {"Penguin",        "flock"},
+    {"Flock",          "flock"},
+    {"Pigvision",      "flock"},
+    // Ring / consumer cameras
+    {"Ring",           "ring"},
+    // Smart glasses / recording devices
+    {"rayban",         "glasses"},
+    {"ray-ban",        "glasses"},
+    {"ray ban",        "glasses"},
+};
+
+// BLE Manufacturer Company IDs (from Bluetooth SIG assigned numbers)
+struct MfrEntry {
+    uint16_t id;
+    const char* category;
+};
+
+static const MfrEntry ble_manufacturer_entries[] = {
+    // Flock Safety / ALPR
+    {0x09C8, "flock"},     // XUNTONG — Flock Safety cameras
+    // Consumer surveillance (Amazon ecosystem)
+    {0x0171, "ring"},      // Amazon — Ring doorbells, Echo, Blink
+    // Smart glasses / recording devices
+    {0x01AB, "glasses"},   // Meta Platforms — Ray-Ban Meta
+    {0x058E, "glasses"},   // Meta Platforms Technologies — Ray-Ban Meta
+    {0x0D53, "glasses"},   // Luxottica/EssilorLuxottica — Oakley smart glasses
+    {0x03C2, "glasses"},   // Snapchat — Spectacles
+    // Law enforcement equipment
+    {0x034D, "lawenf"},    // TASER International / Axon — body cameras
+    {0x04EC, "lawenf"},    // Motorola Solutions — police radios/cameras
+    // Tracking devices
+    {0x067C, "tracker"},   // Tile — BLE trackers
+    // Surveillance cameras
+    {0x0E25, "camera"},    // Hangzhou Hikvision — surveillance cameras
+    {0x0C19, "camera"},    // Arlo Technologies — security cameras
+    {0x0870, "camera"},    // Wyze Labs — security cameras
 };
 
 // ============================================================================
@@ -173,6 +215,7 @@ struct FYDetection {
     char name[48];
     int rssi;
     char method[24];
+    char category[12];    // flock, glasses, tracker, lawenf, ring, camera, raven, wifi
     unsigned long firstSeen;
     unsigned long lastSeen;
     int count;
@@ -206,10 +249,35 @@ static unsigned long fyPixelAlertStart = 0;
 static unsigned long fyLastBleScan = 0;
 static volatile bool fyWifiAlertPending = false;  // Deferred from promiscuous CB
 static int fyWifiDetCount = 0;
-static bool fyTriggered = false;
 static bool fyDeviceInRange = false;
 static unsigned long fyLastDetTime = 0;
 static unsigned long fyLastHB = 0;
+
+// Per-category alert tracking — each category beeps once, then heartbeat takes over
+#define FY_MAX_ALERTED_CATS 8
+static char fyAlertedCats[FY_MAX_ALERTED_CATS][12] = {};
+static int fyAlertedCatCount = 0;
+
+static bool fyCategoryAlerted(const char* cat) {
+    if (!cat) return false;
+    for (int i = 0; i < fyAlertedCatCount; i++) {
+        if (strcmp(fyAlertedCats[i], cat) == 0) return true;
+    }
+    return false;
+}
+
+static void fyMarkCategoryAlerted(const char* cat) {
+    if (!cat || fyCategoryAlerted(cat)) return;
+    if (fyAlertedCatCount < FY_MAX_ALERTED_CATS) {
+        strlcpy(fyAlertedCats[fyAlertedCatCount], cat, sizeof(fyAlertedCats[0]));
+        fyAlertedCatCount++;
+    }
+}
+
+static void fyClearAlertedCategories() {
+    fyAlertedCatCount = 0;
+    memset(fyAlertedCats, 0, sizeof(fyAlertedCats));
+}
 static NimBLEScan* fyBLEScan = NULL;
 static AsyncWebServer fyServer(80);
 
@@ -317,17 +385,83 @@ static void fyBootBeep() {
     printf("[DANTIR] *caw caw caw*\n");
 }
 
-static void fyDetectBeep() {
-    printf("[DANTIR] Detection alert!\n");
+// ============================================================================
+// MORSE CODE ALERT SYSTEM
+// ============================================================================
+// Each detection category plays its Morse code letter on the buzzer.
+// This serves dual purpose: identify device type + learn Morse code.
+//
+// Morse patterns (. = dit, - = dah):
+//   F ··-·  = Flock/ALPR       G --·   = Glasses/recording
+//   T -     = Tracker           L ·-··  = Law enforcement
+//   R ·-·   = Ring/consumer     S ···   = Surveillance cameras
+//   V ···-  = Raven             W ·--   = WiFi detection
+
+#define MORSE_FREQ     800    // Hz — clean, distinct tone
+#define MORSE_DIT_MS   80     // dit duration
+#define MORSE_DAH_MS   240    // dah = 3x dit
+#define MORSE_GAP_MS   80     // inter-element gap = 1x dit
+#define MORSE_LEAD_MS  30     // tiny pre-delay for audio clarity
+
+// Play a Morse code element (dit or dah)
+static void fyMorseDit() {
+    tone(BUZZER_PIN, MORSE_FREQ, MORSE_DIT_MS);
+    delay(MORSE_DIT_MS + MORSE_GAP_MS);
+}
+
+static void fyMorseDah() {
+    tone(BUZZER_PIN, MORSE_FREQ, MORSE_DAH_MS);
+    delay(MORSE_DAH_MS + MORSE_GAP_MS);
+}
+
+// Play Morse pattern for a detection category
+static void fyMorseCategory(const char* category) {
+    if (!fyBuzzerOn || !category) return;
+    delay(MORSE_LEAD_MS);
+
+    if (strcmp(category, "flock") == 0) {
+        // F: ··-·
+        fyMorseDit(); fyMorseDit(); fyMorseDah(); fyMorseDit();
+    } else if (strcmp(category, "glasses") == 0) {
+        // G: --·
+        fyMorseDah(); fyMorseDah(); fyMorseDit();
+    } else if (strcmp(category, "tracker") == 0) {
+        // T: -
+        fyMorseDah();
+    } else if (strcmp(category, "lawenf") == 0) {
+        // L: ·-··
+        fyMorseDit(); fyMorseDah(); fyMorseDit(); fyMorseDit();
+    } else if (strcmp(category, "ring") == 0) {
+        // R: ·-·
+        fyMorseDit(); fyMorseDah(); fyMorseDit();
+    } else if (strcmp(category, "camera") == 0) {
+        // S: ···
+        fyMorseDit(); fyMorseDit(); fyMorseDit();
+    } else if (strcmp(category, "raven") == 0) {
+        // V: ···-
+        fyMorseDit(); fyMorseDit(); fyMorseDit(); fyMorseDah();
+    } else {
+        // Unknown: single long beep
+        fyMorseDah(); fyMorseDah();
+    }
+    noTone(BUZZER_PIN);
+}
+
+static void fyDetectBeep(const char* category = nullptr) {
+    printf("[DANTIR] Detection alert! [%s]\n", category ? category : "?");
     fyPixelAlertMode = true;
     fyPixelAlertStart = millis();
     if (!fyBuzzerOn) return;
-    // Alarm crow: two sharp ascending chirps then a caw
-    fyCaw(400, 900, 100, 30);   // rising alarm chirp
-    delay(60);
-    fyCaw(450, 950, 100, 30);   // second chirp, higher
-    delay(60);
-    fyCaw(900, 350, 200, 50);   // descending caw
+    if (category) {
+        fyMorseCategory(category);
+    } else {
+        // Fallback: original crow caw for uncategorized
+        fyCaw(400, 900, 100, 30);
+        delay(60);
+        fyCaw(450, 950, 100, 30);
+        delay(60);
+        fyCaw(900, 350, 200, 50);
+    }
 }
 
 static void fyHeartbeat() {
@@ -443,8 +577,8 @@ static bool checkWiFiMACPrefix(const uint8_t* mac) {
 // Forward declarations for functions called by WiFi promiscuous callback
 static bool fyGPSIsFresh();
 static int fyAddDetection(const char* mac, const char* name, int rssi,
-                          const char* method, bool isRaven = false,
-                          const char* ravenFW = "");
+                          const char* method, const char* category = "unknown",
+                          bool isRaven = false, const char* ravenFW = "");
 
 // Called by the WiFi driver for every frame on the AP's channel.
 // Probe requests from devices scanning (on ANY channel) are caught because
@@ -485,12 +619,12 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
     const char *method = (subtype == WIFI_MGMT_PROBE_REQ) ? "wifi_probe" : "wifi_beacon";
     int rssi = pkt->rx_ctrl.rssi;
 
-    int idx = fyAddDetection(mac_str, "", rssi, method);
+    int idx = fyAddDetection(mac_str, "", rssi, method, "ring");  // WiFi OUIs are all Ring/Blink
     if (idx >= 0) {
         if (fyDet[idx].count == 1) {
             // First sighting — new WiFi surveillance device
             fyWifiDetCount++;
-            printf("[DANTIR] WiFi DETECTED: %s RSSI:%d [%s]\n", mac_str, rssi, method);
+            printf("[DANTIR] WiFi DETECTED [ring]: %s RSSI:%d [%s]\n", mac_str, rssi, method);
 
             // JSON serial output
             char gpsBuf[80] = "";
@@ -499,7 +633,7 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
                     ",\"gps\":{\"latitude\":%.8f,\"longitude\":%.8f,\"accuracy\":%.1f}",
                     fyGPSLat, fyGPSLon, fyGPSAcc);
             }
-            printf("{\"detection_method\":\"%s\",\"protocol\":\"wifi\","
+            printf("{\"detection_method\":\"%s\",\"category\":\"ring\",\"protocol\":\"wifi\","
                    "\"mac_address\":\"%s\",\"rssi\":%d%s}\n",
                    method, mac_str, rssi, gpsBuf);
         }
@@ -515,19 +649,21 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
 // DETECTION HELPERS — NAME & MANUFACTURER
 // ============================================================================
 
-static bool checkDeviceName(const char* name) {
-    if (!name || !name[0]) return false;
-    for (size_t i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
-        if (strcasestr(name, device_name_patterns[i])) return true;
+// Returns category string if name matches, or nullptr
+static const char* checkDeviceName(const char* name) {
+    if (!name || !name[0]) return nullptr;
+    for (size_t i = 0; i < sizeof(device_name_entries)/sizeof(device_name_entries[0]); i++) {
+        if (strcasestr(name, device_name_entries[i].pattern)) return device_name_entries[i].category;
     }
-    return false;
+    return nullptr;
 }
 
-static bool checkManufacturerID(uint16_t id) {
-    for (size_t i = 0; i < sizeof(ble_manufacturer_ids)/sizeof(ble_manufacturer_ids[0]); i++) {
-        if (ble_manufacturer_ids[i] == id) return true;
+// Returns category string if manufacturer ID matches, or nullptr
+static const char* checkManufacturerID(uint16_t id) {
+    for (size_t i = 0; i < sizeof(ble_manufacturer_entries)/sizeof(ble_manufacturer_entries[0]); i++) {
+        if (ble_manufacturer_entries[i].id == id) return ble_manufacturer_entries[i].category;
     }
-    return false;
+    return nullptr;
 }
 
 // ============================================================================
@@ -640,8 +776,8 @@ static void fyProcessHardwareGPS() {
 // ============================================================================
 
 static int fyAddDetection(const char* mac, const char* name, int rssi,
-                          const char* method, bool isRaven,
-                          const char* ravenFW) {
+                          const char* method, const char* category,
+                          bool isRaven, const char* ravenFW) {
     if (!fyMutex || xSemaphoreTake(fyMutex, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
 
     // Update existing by MAC
@@ -682,6 +818,7 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
         d.rssi = rssi;
         d.bestRSSI = rssi;  // First sighting = initial best
         strncpy(d.method, method, sizeof(d.method) - 1);
+        strncpy(d.category, category ? category : "unknown", sizeof(d.category) - 1);
         d.firstSeen = millis();
         d.lastSeen = millis();
         d.count = 1;
@@ -729,26 +866,33 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
         bool isRaven = false;
         const char* ravenFW = "";
 
+        const char* cat = nullptr;
+
         // 1. Check MAC prefix against known surveillance device OUIs (BLE)
         if (checkBLEMACPrefix(mac)) {
             detected = true;
             method = "mac_prefix";
+            cat = "flock";  // MAC prefixes are all Flock Safety OUIs
         }
 
-        // 2. Check BLE device name patterns
-        if (!detected && !name.empty() && checkDeviceName(name.c_str())) {
-            detected = true;
-            method = "device_name";
+        // 2. Check BLE device name patterns (returns category or nullptr)
+        if (!detected && !name.empty()) {
+            cat = checkDeviceName(name.c_str());
+            if (cat) {
+                detected = true;
+                method = "device_name";
+            }
         }
 
-        // 3. Check BLE manufacturer company IDs (from wgreenberg/flock-you)
+        // 3. Check BLE manufacturer company IDs (returns category or nullptr)
         if (!detected) {
             for (int i = 0; i < (int)dev->getManufacturerDataCount(); i++) {
                 std::string data = dev->getManufacturerData(i);
                 if (data.size() >= 2) {
                     uint16_t code = ((uint16_t)(uint8_t)data[1] << 8) |
                                      (uint16_t)(uint8_t)data[0];
-                    if (checkManufacturerID(code)) {
+                    cat = checkManufacturerID(code);
+                    if (cat) {
                         detected = true;
                         method = "ble_mfr_id";
                         break;
@@ -763,6 +907,7 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
             if (checkRavenUUID(dev, detUUID)) {
                 detected = true;
                 method = "raven_uuid";
+                cat = "raven";
                 isRaven = true;
                 ravenFW = estimateRavenFW(dev);
             }
@@ -770,11 +915,13 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
         if (detected) {
             int idx = fyAddDetection(addrStr.c_str(), name.c_str(), rssi,
-                                     method, isRaven, ravenFW);
+                                     method, cat ? cat : "unknown",
+                                     isRaven, ravenFW);
 
             // Human-readable log
-            printf("[DANTIR] DETECTED: %s %s RSSI:%d [%s] count:%d\n",
-                   addrStr.c_str(), name.c_str(), rssi, method,
+            const char* catStr = cat ? cat : "unknown";
+            printf("[DANTIR] DETECTED [%s]: %s %s RSSI:%d [%s] count:%d\n",
+                   catStr, addrStr.c_str(), name.c_str(), rssi, method,
                    idx >= 0 ? fyDet[idx].count : 0);
 
             // JSON serial output (Flask-compatible format for live ingestion)
@@ -786,24 +933,24 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                     fyGPSLat, fyGPSLon, fyGPSAcc);
             }
             if (isRaven) {
-                printf("{\"detection_method\":\"%s\",\"protocol\":\"bluetooth_le\","
+                printf("{\"detection_method\":\"%s\",\"category\":\"%s\",\"protocol\":\"bluetooth_le\","
                        "\"mac_address\":\"%s\",\"device_name\":\"%s\","
                        "\"rssi\":%d,\"is_raven\":true,\"raven_fw\":\"%s\"%s}\n",
-                       method, addrStr.c_str(), name.c_str(), rssi, ravenFW, gpsBuf);
+                       method, catStr, addrStr.c_str(), name.c_str(), rssi, ravenFW, gpsBuf);
             } else {
-                printf("{\"detection_method\":\"%s\",\"protocol\":\"bluetooth_le\","
+                printf("{\"detection_method\":\"%s\",\"category\":\"%s\",\"protocol\":\"bluetooth_le\","
                        "\"mac_address\":\"%s\",\"device_name\":\"%s\","
                        "\"rssi\":%d%s}\n",
-                       method, addrStr.c_str(), name.c_str(), rssi, gpsBuf);
+                       method, catStr, addrStr.c_str(), name.c_str(), rssi, gpsBuf);
             }
 
-            if (!fyTriggered) {
-                fyTriggered = true;
-                fyDetectBeep();
+            if (!fyCategoryAlerted(catStr)) {
+                fyMarkCategoryAlerted(catStr);
+                fyDetectBeep(catStr);
+                fyLastHB = millis();  // Start heartbeat countdown AFTER the alert beep
             }
             fyDeviceInRange = true;
             fyLastDetTime = millis();
-            fyLastHB = millis();
         }
     }
 };
@@ -819,9 +966,11 @@ static void writeDetectionsJSON(AsyncResponseStream *resp) {
             if (i > 0) resp->print(",");
             resp->printf(
                 "{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
+                "\"cat\":\"%s\","
                 "\"first\":%lu,\"last\":%lu,\"count\":%d,"
                 "\"raven\":%s,\"fw\":\"%s\"",
                 fyDet[i].mac, fyDet[i].name, fyDet[i].rssi, fyDet[i].method,
+                fyDet[i].category,
                 fyDet[i].firstSeen, fyDet[i].lastSeen, fyDet[i].count,
                 fyDet[i].isRaven ? "true" : "false", fyDet[i].ravenFW);
             // Append GPS if present (first-seen position)
@@ -858,9 +1007,11 @@ static void fySaveSession() {
         if (i > 0) f.print(",");
         FYDetection& d = fyDet[i];
         f.printf("{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
+                 "\"cat\":\"%s\","
                  "\"first\":%lu,\"last\":%lu,\"count\":%d,"
                  "\"raven\":%s,\"fw\":\"%s\"",
                  d.mac, d.name, d.rssi, d.method,
+                 d.category,
                  d.firstSeen, d.lastSeen, d.count,
                  d.isRaven ? "true" : "false", d.ravenFW);
         if (d.hasGPS) {
@@ -914,6 +1065,80 @@ static void fyPromotePrevSession() {
     // Delete the old session file so it doesn't get re-promoted next boot
     SPIFFS.remove(FY_SESSION_FILE);
     printf("[DANTIR] Prior session promoted: %d bytes\n", data.length());
+}
+
+// Restore detections from prev_session into live array (append mode)
+// Called after promotion — loads prev_session data so dashboard survives reboots
+static void fyRestoreSession() {
+    if (!fySpiffsReady || !SPIFFS.exists(FY_PREV_FILE)) {
+        printf("[DANTIR] No prev_session to restore\n");
+        return;
+    }
+
+    File f = SPIFFS.open(FY_PREV_FILE, "r");
+    if (!f) {
+        printf("[DANTIR] Failed to open prev_session for restore\n");
+        return;
+    }
+    String data = f.readString();
+    f.close();
+
+    if (data.length() == 0) {
+        printf("[DANTIR] prev_session empty, nothing to restore\n");
+        return;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, data);
+    if (err || !doc.is<JsonArray>()) {
+        printf("[DANTIR] prev_session JSON parse failed: %s\n", err.c_str());
+        return;
+    }
+
+    int restored = 0;
+    for (JsonObject d : doc.as<JsonArray>()) {
+        if (fyDetCount >= MAX_DETECTIONS) break;
+
+        FYDetection& det = fyDet[fyDetCount];
+        memset(&det, 0, sizeof(FYDetection));
+
+        strlcpy(det.mac, d["mac"] | "", sizeof(det.mac));
+        strlcpy(det.name, d["name"] | "", sizeof(det.name));
+        det.rssi = d["rssi"] | 0;
+        strlcpy(det.method, d["method"] | "", sizeof(det.method));
+        strlcpy(det.category, d["cat"] | "unknown", sizeof(det.category));
+        det.firstSeen = d["first"] | 0UL;
+        det.lastSeen = d["last"] | 0UL;
+        det.count = d["count"] | 1;
+        det.isRaven = d["raven"] | false;
+        strlcpy(det.ravenFW, d["fw"] | "", sizeof(det.ravenFW));
+
+        JsonObject gps = d["gps"];
+        if (gps && gps["lat"]) {
+            det.gpsLat = gps["lat"] | 0.0;
+            det.gpsLon = gps["lon"] | 0.0;
+            det.gpsAcc = gps["acc"] | 0.0f;
+            det.hasGPS = true;
+        }
+
+        if (d["best_rssi"].is<int>()) {
+            det.bestRSSI = d["best_rssi"] | 0;
+            JsonObject bgps = d["best_gps"];
+            if (bgps && bgps["lat"]) {
+                det.bestGPSLat = bgps["lat"] | 0.0;
+                det.bestGPSLon = bgps["lon"] | 0.0;
+                det.bestGPSAcc = bgps["acc"] | 0.0f;
+                det.hasBestGPS = true;
+            }
+        }
+
+        fyDetCount++;
+        restored++;
+    }
+
+    // Mark as already saved so we don't immediately re-write the same data
+    fyLastSaveCount = fyDetCount;
+    printf("[DANTIR] Restored %d detections from prev_session\n", restored);
 }
 
 // ============================================================================
@@ -979,7 +1204,7 @@ static const char FY_HTML[] PROGMEM = R"rawliteral(
 --t1:#e0e0e0;--t2:rgba(139,92,246,.5);
 --grid:rgba(236,72,153,.02);
 --rr:rgba(139,92,246,.2);--rs:rgba(236,72,153,.4);
---bl-flock:#8b5cf6;--bl-ring:#ef4444;--bl-raven:#dc2626;--bl-other:#6b7280;
+--bl-flock:#ef4444;--bl-ring:#60a5fa;--bl-raven:#f59e0b;--bl-other:#6b7280;
 --btn-bg:#8b5cf6;--btn-act:#ec4899;
 }
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1008,6 +1233,9 @@ font-family:inherit;font-size:11px;font-weight:bold;letter-spacing:1px;cursor:po
 .det{background:var(--bg-card);border:1px solid var(--b2);border-radius:7px;padding:10px;margin-bottom:8px;border-left:3px solid var(--a2)}
 .det.t-flock{border-left-color:var(--bl-flock)}.det.t-ring{border-left-color:var(--bl-ring)}
 .det.t-raven{border-left-color:var(--bl-raven)}.det.t-wifi{border-left-color:#22c55e}
+.det.t-glasses{border-left-color:#e879f9}.det.t-lawenf{border-left-color:#f43f5e}
+.det.t-tracker{border-left-color:#fb923c}.det.t-camera{border-left-color:#94a3b8}
+.det.t-unknown{border-left-color:#6b7280}
 .det .mac{color:var(--a1);font-weight:bold;font-size:14px}
 .det .nm{color:var(--a3);font-size:13px;margin-left:4px}
 .det .inf{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;font-size:12px}
@@ -1022,8 +1250,8 @@ font-family:inherit;font-size:11px;font-weight:bold;letter-spacing:1px;cursor:po
 .rp-b.open{display:block}
 #rC{max-width:100%;border-radius:7px}
 .rp-lg{margin-top:8px;font-size:11px;display:flex;justify-content:center;gap:12px;color:var(--t1)}
-.ch{background:var(--bg-card);border:1px solid var(--b2);border-radius:7px;margin-bottom:10px;overflow:hidden}
-.ch canvas{width:100%;display:block}
+.ch{background:var(--bg-card);border:1px solid var(--b2);border-radius:7px;margin-bottom:10px;overflow:hidden;max-height:160px}
+.ch canvas{width:100%;display:block;max-height:150px}
 .pg{margin-bottom:12px}
 .pg h3{color:var(--a1);font-size:14px;margin-bottom:4px;border-bottom:1px solid var(--b3);padding-bottom:4px}
 .pg .it{display:flex;flex-wrap:wrap;gap:4px;font-size:12px}
@@ -1061,7 +1289,7 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 <div class="rp">
 <div class="rp-h" onclick="togRadar()"><div><span class="arr" id="rArr">&#9654;</span> PROXIMITY RADAR</div><span class="rp-ct" id="rCt">0 devices</span></div>
 <div class="rp-b" id="rB"><canvas id="rC" width="280" height="280"></canvas>
-<div class="rp-lg"><span style="color:var(--bl-flock)">&#9679;</span>Flock <span style="color:var(--bl-ring)">&#9679;</span>Ring <span style="color:var(--bl-raven)">&#9679;</span>Raven <span style="color:var(--bl-other)">&#9679;</span>Other</div></div>
+<div class="rp-lg"><span style="color:var(--bl-flock)">&#9679;</span>Flock <span style="color:var(--bl-ring)">&#9679;</span>Ring <span style="color:var(--bl-raven)">&#9679;</span>Raven <span style="color:#22c55e">&#9679;</span>WiFi <span style="color:#e879f9">&#9679;</span>Glasses <span style="color:#f43f5e">&#9679;</span>LawEnf <span style="color:#fb923c">&#9679;</span>Tracker <span style="color:var(--bl-other)">&#9679;</span>Other</div></div>
 </div>
 <div class="ch" id="chP" style="display:none"><canvas id="chC" height="60"></canvas></div>
 <div id="dL"><div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div></div>
@@ -1071,13 +1299,13 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 <div class="pn" id="p3">
 <h4>EXPORT DETECTIONS</h4>
 <p style="font-size:10px;color:var(--a2);margin-bottom:8px">Download current session data</p>
-<button class="btn" onclick="location.href='/api/export/json'">DOWNLOAD JSON</button>
-<button class="btn" onclick="location.href='/api/export/csv'">DOWNLOAD CSV</button>
-<button class="btn" onclick="location.href='/api/export/kml'" style="background:#22c55e">DOWNLOAD KML (GPS MAP)</button>
+<button class="btn" onclick="dlTS('/api/export/json','dantir','json')">DOWNLOAD JSON</button>
+<button class="btn" onclick="dlTS('/api/export/csv','dantir','csv')">DOWNLOAD CSV</button>
+<button class="btn" onclick="dlTS('/api/export/kml','dantir','kml')" style="background:#22c55e">DOWNLOAD KML (GPS MAP)</button>
 <hr class="sep">
 <h4>PRIOR SESSION</h4>
-<button class="btn" onclick="location.href='/api/history/json'" style="background:#6366f1">DOWNLOAD PREV JSON</button>
-<button class="btn" onclick="location.href='/api/history/kml'" style="background:#22c55e">DOWNLOAD PREV KML</button>
+<button class="btn" onclick="dlTS('/api/history/json','dantir_prev','json')" style="background:#6366f1">DOWNLOAD PREV JSON</button>
+<button class="btn" onclick="dlTS('/api/history/kml','dantir_prev','kml')" style="background:#22c55e">DOWNLOAD PREV KML</button>
 <hr class="sep">
 <button class="btn dng" onclick="if(confirm('Clear all detections?'))fetch('/api/clear').then(()=>refresh())">CLEAR ALL DETECTIONS</button>
 </div>
@@ -1094,7 +1322,7 @@ purple:{
 '--t1':'#e0e0e0','--t2':'rgba(139,92,246,.5)',
 '--grid':'rgba(236,72,153,.02)',
 '--rr':'rgba(139,92,246,.2)','--rs':'rgba(236,72,153,.4)',
-'--bl-flock':'#8b5cf6','--bl-ring':'#ef4444','--bl-raven':'#dc2626','--bl-other':'#6b7280',
+'--bl-flock':'#ef4444','--bl-ring':'#60a5fa','--bl-raven':'#f59e0b','--bl-other':'#6b7280',
 '--btn-bg':'#8b5cf6','--btn-act':'#ec4899'},
 tactical:{
 '--bg-body':'#0a0f0a','--bg-hdr':'#0f1a0f',
@@ -1105,7 +1333,7 @@ tactical:{
 '--t1':'#d4f4dd','--t2':'rgba(34,197,94,.4)',
 '--grid':'rgba(34,197,94,.03)',
 '--rr':'rgba(34,197,94,.25)','--rs':'rgba(250,204,21,.4)',
-'--bl-flock':'#84cc16','--bl-ring':'#ef4444','--bl-raven':'#dc2626','--bl-other':'#a3a3a3',
+'--bl-flock':'#ef4444','--bl-ring':'#3b82f6','--bl-raven':'#f59e0b','--bl-other':'#a3a3a3',
 '--btn-bg':'#16a34a','--btn-act':'#facc15'},
 ithildin:{
 '--bg-body':'#080811','--bg-hdr':'#0f0f1f',
@@ -1116,7 +1344,7 @@ ithildin:{
 '--t1':'#f1f5f9','--t2':'rgba(148,163,184,.4)',
 '--grid':'rgba(96,165,250,.02)',
 '--rr':'rgba(148,163,184,.2)','--rs':'rgba(96,165,250,.35)',
-'--bl-flock':'#60a5fa','--bl-ring':'#ef4444','--bl-raven':'#dc2626','--bl-other':'#94a3b8',
+'--bl-flock':'#ef4444','--bl-ring':'#60a5fa','--bl-raven':'#f59e0b','--bl-other':'#94a3b8',
 '--btn-bg':'#3b82f6','--btn-act':'#60a5fa'}
 };
 function setTheme(n){const t=TH[n];if(!t)return;const r=document.documentElement;
@@ -1134,14 +1362,12 @@ function tab(i,el){document.querySelectorAll('.tb button').forEach(b=>b.classLis
 document.querySelectorAll('.pn').forEach(p=>p.classList.remove('a'));
 el.classList.add('a');document.getElementById('p'+i).classList.add('a');
 if(i===1&&!window._hL)loadHistory();if(i===2&&!window._pL)loadPat();}
+// === TIMESTAMPED DOWNLOAD ===
+function dlTS(url,prefix,ext){const d=new Date();const ts=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+'_'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+String(d.getSeconds()).padStart(2,'0');fetch(url).then(r=>r.blob()).then(b=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=prefix+'_'+ts+'.'+ext;a.click();URL.revokeObjectURL(a.href);});}
 // === REFRESH ===
 function refresh(){fetch('/api/detections').then(r=>r.json()).then(d=>{D=d;render();stats();drawChart();}).catch(()=>{});}
 // === DETECT TYPE ===
-function dtype(d){if(d.raven)return'raven';
-const m=d.method||'',n=(d.name||'').toLowerCase();
-if(m==='wifi_beacon'||m==='wifi_probe')return'wifi';
-if(n.indexOf('ring')>=0||n.indexOf('blink')>=0||m==='ble_mfr_id')return'ring';
-return'flock';}
+function dtype(d){return d.cat||'unknown';}
 // === RENDER LIST ===
 function render(){const el=document.getElementById('dL');
 if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>';return;}
@@ -1212,6 +1438,11 @@ if(t==='raven')col=cs.getPropertyValue('--bl-raven').trim();
 else if(t==='ring')col=cs.getPropertyValue('--bl-ring').trim();
 else if(t==='flock')col=cs.getPropertyValue('--bl-flock').trim();
 else if(t==='wifi')col='#22c55e';
+else if(t==='glasses')col='#e879f9';
+else if(t==='lawenf')col='#f43f5e';
+else if(t==='tracker')col='#fb923c';
+else if(t==='camera')col='#94a3b8';
+else if(t==='wifi')col='#22c55e';
 ctx.fillStyle=col;ctx.globalAlpha=1;ctx.beginPath();ctx.arc(bx,by,4,0,Math.PI*2);ctx.fill();
 // glow for high count
 if(det.count>5){ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.globalAlpha=.35;
@@ -1235,6 +1466,10 @@ if(t==='raven')col=cs.getPropertyValue('--bl-raven').trim();
 else if(t==='ring')col=cs.getPropertyValue('--bl-ring').trim();
 else if(t==='flock')col=cs.getPropertyValue('--bl-flock').trim();
 else if(t==='wifi')col='#22c55e';
+else if(t==='glasses')col='#e879f9';
+else if(t==='lawenf')col='#f43f5e';
+else if(t==='tracker')col='#fb923c';
+else if(t==='camera')col='#94a3b8';
 // label
 ctx.fillStyle=cs.getPropertyValue('--t1').trim();ctx.font='10px monospace';ctx.textAlign='right';
 const lbl=d.name?d.name.substring(0,10):d.mac.substring(9);
@@ -1370,14 +1605,14 @@ static void fySetupServer() {
             resp->printf("\"%s\"", wifi_mac_prefixes[i]);
         }
         resp->print("],\"names\":[");
-        for (size_t i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
+        for (size_t i = 0; i < sizeof(device_name_entries)/sizeof(device_name_entries[0]); i++) {
             if (i > 0) resp->print(",");
-            resp->printf("\"%s\"", device_name_patterns[i]);
+            resp->printf("{\"p\":\"%s\",\"c\":\"%s\"}", device_name_entries[i].pattern, device_name_entries[i].category);
         }
         resp->print("],\"mfr\":[");
-        for (size_t i = 0; i < sizeof(ble_manufacturer_ids)/sizeof(ble_manufacturer_ids[0]); i++) {
+        for (size_t i = 0; i < sizeof(ble_manufacturer_entries)/sizeof(ble_manufacturer_entries[0]); i++) {
             if (i > 0) resp->print(",");
-            resp->printf("%u", ble_manufacturer_ids[i]);
+            resp->printf("{\"id\":%u,\"c\":\"%s\"}", ble_manufacturer_entries[i].id, ble_manufacturer_entries[i].category);
         }
         resp->print("],\"raven\":[");
         for (size_t i = 0; i < sizeof(raven_service_uuids)/sizeof(raven_service_uuids[0]); i++) {
@@ -1520,7 +1755,7 @@ static void fySetupServer() {
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             fyDetCount = 0;
             memset(fyDet, 0, sizeof(fyDet));
-            fyTriggered = false;
+            fyClearAlertedCategories();
             fyDeviceInRange = false;
             xSemaphoreGive(fyMutex);
         }
@@ -1573,8 +1808,10 @@ void setup() {
     if (SPIFFS.begin(true)) {
         fySpiffsReady = true;
         printf("[DANTIR] SPIFFS ready\n");
-        // Promote last session to prev_session before we start a new one
+        // Promote last session to prev_session (backup), then restore into live array
+        // This means: prev_session always has a backup, AND dashboard keeps all detections
         fyPromotePrevSession();
+        fyRestoreSession();
     } else {
         printf("[DANTIR] SPIFFS init failed - no persistence\n");
     }
@@ -1624,8 +1861,8 @@ void setup() {
 
     printf("[DANTIR] BLE: %d OUI prefixes, %d name patterns, %d mfr IDs, %d Raven UUIDs\n",
         (int)(sizeof(ble_mac_prefixes)/sizeof(ble_mac_prefixes[0])),
-        (int)(sizeof(device_name_patterns)/sizeof(device_name_patterns[0])),
-        (int)(sizeof(ble_manufacturer_ids)/sizeof(ble_manufacturer_ids[0])),
+        (int)(sizeof(device_name_entries)/sizeof(device_name_entries[0])),
+        (int)(sizeof(ble_manufacturer_entries)/sizeof(ble_manufacturer_entries[0])),
         (int)(sizeof(raven_service_uuids)/sizeof(raven_service_uuids[0])));
     printf("[DANTIR] WiFi: %d OUI prefixes (promiscuous mode ACTIVE)\n",
         (int)(sizeof(wifi_mac_prefixes)/sizeof(wifi_mac_prefixes[0])));
@@ -1651,14 +1888,14 @@ void loop() {
     // WiFi detection alert (deferred from promiscuous callback — can't buzz there)
     if (fyWifiAlertPending) {
         fyWifiAlertPending = false;
-        if (!fyTriggered) {
-            fyTriggered = true;
-            fyDetectBeep();
+        if (!fyCategoryAlerted("ring")) {
+            fyMarkCategoryAlerted("ring");
+            fyDetectBeep("ring");  // WiFi OUIs are all Ring/Blink
+            fyLastHB = millis();
         }
-        fyLastHB = millis();
     }
 
-    // Heartbeat tracking
+    // Heartbeat tracking — runs on clean 10s cadence, independent of re-detections
     if (fyDeviceInRange) {
         if (millis() - fyLastHB >= 10000) {
             fyHeartbeat();
@@ -1667,7 +1904,7 @@ void loop() {
         if (millis() - fyLastDetTime >= 30000) {
             printf("[DANTIR] Device out of range - stopping heartbeat\n");
             fyDeviceInRange = false;
-            fyTriggered = false;
+            fyClearAlertedCategories();
         }
     }
 
