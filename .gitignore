@@ -4,3 +4,14 @@
 *.swo
 *~
 .DS_Store
+
+# Detection data — NEVER commit. Contains GPS coordinates of real
+# locations and movement routes. One leaked export deanonymizes home + routes.
+dantir_*.json
+dantir_*.kml
+dantir_*.csv
+*.kml
+data/
+dantir-data/
+exports/
+sessions/
