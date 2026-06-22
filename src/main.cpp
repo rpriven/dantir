@@ -1520,6 +1520,12 @@ h+='<div class="pg"><h3>Raven UUIDs ('+p.raven.length+')</h3><div class="it">'+p
 document.getElementById('pC').innerHTML=h;window._pL=1;}).catch(()=>{});}
 // === GPS ===
 let _gW=null,_gOk=false,_gTried=false;
+// Screen Wake Lock — keep the screen on during GPS capture. Phone screen-sleep suspends the
+// page and stops geolocation (the #1 cause of GPS-less detections while walking). Re-acquire
+// when the page returns to the foreground. Needs a secure context (same flag GPS already needs).
+let _wl=null;
+async function acquireWake(){try{if('wakeLock' in navigator){_wl=await navigator.wakeLock.request('screen');_wl.addEventListener('release',function(){_wl=null;});}}catch(e){}}
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&_gW!==null&&_wl===null){acquireWake();}});
 function sendGPS(p){_gOk=true;let g=document.getElementById('sG');g.textContent='OK';g.style.color='#22c55e';
 fetch('/api/gps?lat='+p.coords.latitude+'&lon='+p.coords.longitude+'&acc='+(p.coords.accuracy||0)).catch(()=>{});}
 function gpsErr(e){_gOk=false;let g=document.getElementById('sG');
@@ -1530,7 +1536,7 @@ g.textContent=msg;}
 function startGPS(){if(!navigator.geolocation){return false;}
 if(_gW!==null){navigator.geolocation.clearWatch(_gW);_gW=null;}
 let g=document.getElementById('sG');g.textContent='...';g.style.color='#facc15';
-_gW=navigator.geolocation.watchPosition(sendGPS,gpsErr,{enableHighAccuracy:true,maximumAge:5000,timeout:15000});return true;}
+_gW=navigator.geolocation.watchPosition(sendGPS,gpsErr,{enableHighAccuracy:true,maximumAge:5000,timeout:15000});acquireWake();return true;}
 function reqGPS(){if(!navigator.geolocation){alert('GPS not available in this browser.');return;}
 if(_gOk){return;}
 if(!window.isSecureContext){alert('GPS requires a secure context (HTTPS). This HTTP page may not get GPS permission.\\n\\nAndroid Chrome: try chrome://flags and enable "Insecure origins treated as secure", add http://192.168.4.1\\n\\niPhone: GPS will not work over HTTP.');}
