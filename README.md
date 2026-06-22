@@ -43,32 +43,37 @@ Dantir uses **seven detection methods** across BLE and WiFi:
 
 | Method | Radio | How it matches |
 |--------|-------|----------------|
-| `mac_prefix` | BLE | MAC OUI against ~20 Flock Safety prefixes |
+| `mac_prefix` | BLE | MAC OUI against the Flock Safety prefix set (lowest confidence — see note) |
 | `device_name` | BLE | Advertised name patterns (Flock, Penguin, Pigvision, Ring, Ray-Ban…) |
 | `ble_mfr_id` | BLE | Bluetooth manufacturer company IDs |
 | `raven_uuid` | BLE | Raven gunshot-detector service UUIDs (+ firmware-version estimate) |
 | `wifi_probe` | WiFi | Probe-request source MAC OUI (promiscuous mode) |
 | `wifi_beacon` | WiFi | Beacon-frame source MAC OUI (promiscuous mode) |
 
-Detections are grouped into **eight categories**, each with its own Morse-code
+Detections are grouped into **ten categories**, each with its own Morse-code
 audio signature on the buzzer:
 
 | Category | Morse | What it covers |
 |----------|:-----:|----------------|
-| `flock`   | ··-· (F) | Flock Safety / ALPR cameras, Penguin, Pigvision |
-| `glasses` | --· (G)  | Recording smart glasses (Ray-Ban Meta, Oakley, Snap) |
-| `tracker` | - (T)    | Bluetooth trackers (Tile, etc.) |
-| `lawenf`  | ·-·· (L) | Law-enforcement gear (TASER/Axon, Motorola Solutions) |
-| `ring`    | ·-· (R)  | Ring / Blink / Amazon cameras |
-| `camera`  | ··· (S)  | Other surveillance cameras (Hikvision, Arlo, Wyze) |
-| `raven`   | ···- (V) | Raven gunshot-detector nodes |
-| `wifi`    | ·-- (W)  | Generic WiFi-side detections |
+| `flock`      | ··-· (F) | Flock Safety / ALPR cameras, Penguin, Pigvision |
+| `axon`       | ·- (A)   | Axon ALPR cameras (the vendor replacing Flock in some cities) |
+| `glasses`    | --· (G)  | Camera-equipped smart glasses (Ray-Ban Meta, Oakley, Snap) |
+| `vr_headset` | · (E)    | VR headsets (Quest/Oculus) — benign; logged with a quiet blip, not a threat alert |
+| `tracker`    | - (T)    | Bluetooth trackers (Tile, etc.) |
+| `lawenf`     | ·-·· (L) | Law-enforcement gear (TASER/Axon body-cams, Motorola Solutions) |
+| `ring`       | ·-· (R)  | Ring / Blink / Amazon cameras |
+| `camera`     | ··· (S)  | Other surveillance cameras (Hikvision, Arlo, Wyze) |
+| `raven`      | ···- (V) | Raven gunshot-detector nodes |
+| `wifi`       | ·-- (W)  | Generic WiFi-side detections |
 
-> **Detection is signature-based, not proof.** OUI/manufacturer matches catch
-> consumer hardware that shares the same chipset vendors (e.g. some Wyze, Hue,
-> or OBD-II dongles can trip a low-confidence match). Treat `device_name` and
-> `ble_mfr_id` hits as higher confidence than a bare `mac_prefix` match, and
-> confirm visually before drawing conclusions.
+> **Detection is signature-based, not proof.** Many OUIs are shared across a
+> chipset vendor's entire catalog, so a bare `mac_prefix` match is the
+> lowest-confidence signal. Treat `device_name`, `ble_mfr_id`, and `raven_uuid`
+> hits as higher confidence, and confirm visually before drawing conclusions.
+> Known shared-OUI false-positive sources — e.g. a Silicon Labs prefix that also
+> covers Wyze locks and OBD-II dongles, and the Raspberry Pi prefix — have been
+> pulled from the Flock list; real Flock-on-RPi now relies on name (Penguin /
+> Pigvision) and manufacturer ID, not a bare OUI.
 
 ---
 

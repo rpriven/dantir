@@ -450,6 +450,12 @@ static void fyMorseCategory(const char* category) {
     } else if (strcmp(category, "raven") == 0) {
         // V: ···-
         fyMorseDit(); fyMorseDit(); fyMorseDit(); fyMorseDah();
+    } else if (strcmp(category, "axon") == 0) {
+        // A: ·-  (Axon ALPR — Flock's municipal replacement)
+        fyMorseDit(); fyMorseDah();
+    } else if (strcmp(category, "vr_headset") == 0) {
+        // E: ·  (single dit — VR headset, benign; quiet acknowledgement, not a threat)
+        fyMorseDit();
     } else {
         // Unknown: single long beep
         fyMorseDah(); fyMorseDah();
