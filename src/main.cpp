@@ -96,11 +96,16 @@
 // Known Flock Safety MAC address prefixes (OUIs) — matched during BLE scan
 static const char* ble_mac_prefixes[] = {
     // Flock Safety — FS Ext Battery devices
-    "58:8e:81", "cc:cc:cc", "ec:1b:bd", "90:35:ea", "04:0d:84",
+    "58:8e:81", "cc:cc:cc", "ec:1b:bd", "90:35:ea",
     "f0:82:c0", "1c:34:f1", "38:5b:44", "94:34:69", "b4:e3:f9",
     // Flock Safety — WiFi-enabled devices
     "70:c9:4e", "3c:91:80", "d8:f3:bc", "80:30:49", "14:5a:fc",
-    "74:4c:a1", "08:3a:88", "9c:2f:9d", "94:08:53", "e4:aa:ea"
+    "74:4c:a1", "9c:2f:9d", "94:08:53", "e4:aa:ea"
+    // REMOVED 2026-06-23 (false-positive sources — see signatures/ audit):
+    //   "04:0d:84" — Silicon Labs OUI (Wyze Lock / BlueDriver / Philips Hue), NOT Flock
+    //   "08:3a:88" — Raspberry Pi Foundation OUI (millions of hobby RPis), too ambiguous
+    // Both produced false "flock" tags. Real Flock-on-RPi now relies on name
+    // (Penguin/Pigvision) + mfr ID 0x09C8, not these shared OUIs.
 };
 
 // ============================================================================
@@ -166,14 +171,19 @@ static const MfrEntry ble_manufacturer_entries[] = {
 // These OUIs are checked against source MACs in WiFi management frames
 // (probe requests, beacon frames) captured via promiscuous callback.
 
-// Ring LLC OUI prefixes (IEEE registered, verified Feb 2026)
-static const char* wifi_mac_prefixes[] = {
+// WiFi-side surveillance OUI prefixes (matched in promiscuous mode). Each carries its
+// own category so matches aren't all assumed Ring (mirrors the shared signatures/ library).
+struct WifiPrefixEntry { const char* prefix; const char* category; };
+static const WifiPrefixEntry wifi_mac_prefixes[] = {
     // Ring LLC
-    "00:b4:63", "18:7f:88", "24:2b:d6", "34:3e:a4",
-    "54:e0:19", "5c:47:5e", "64:9a:63", "90:48:6c",
-    "9c:76:13", "ac:9f:c3", "c4:db:ad", "cc:3b:fb",
+    {"00:b4:63","ring"}, {"18:7f:88","ring"}, {"24:2b:d6","ring"}, {"34:3e:a4","ring"},
+    {"54:e0:19","ring"}, {"5c:47:5e","ring"}, {"64:9a:63","ring"}, {"90:48:6c","ring"},
+    {"9c:76:13","ring"}, {"ac:9f:c3","ring"}, {"c4:db:ad","ring"}, {"cc:3b:fb","ring"},
     // Blink by Amazon (Ring's sister brand)
-    "70:ad:43"
+    {"70:ad:43","ring"},
+    // Axon ALPR — catches Lightpost's 2.4GHz radio / Outpost in setup mode.
+    // (Deployed Outpost is LTE-only/RF-silent; Lightpost's 5GHz is invisible to ESP32.)
+    {"00:25:df","axon"},
 };
 
 // ============================================================================
@@ -562,13 +572,14 @@ static bool checkBLEMACPrefix(const uint8_t* mac) {
     return false;
 }
 
-static bool checkWiFiMACPrefix(const uint8_t* mac) {
+// Returns the category for a matching WiFi OUI, or nullptr if no match.
+static const char* checkWiFiMACPrefix(const uint8_t* mac) {
     char mac_str[9];
     snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
     for (size_t i = 0; i < sizeof(wifi_mac_prefixes)/sizeof(wifi_mac_prefixes[0]); i++) {
-        if (strncasecmp(mac_str, wifi_mac_prefixes[i], 8) == 0) return true;
+        if (strncasecmp(mac_str, wifi_mac_prefixes[i].prefix, 8) == 0) return wifi_mac_prefixes[i].category;
     }
-    return false;
+    return nullptr;
 }
 
 // ============================================================================
@@ -608,7 +619,8 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
     // Address 2 (source/transmitter MAC) at offset 10
     const uint8_t *src_mac = &frame[10];
 
-    if (!checkWiFiMACPrefix(src_mac)) return;
+    const char *wcat = checkWiFiMACPrefix(src_mac);
+    if (!wcat) return;
 
     // Match! Build MAC string and register detection
     char mac_str[18];
@@ -619,12 +631,12 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
     const char *method = (subtype == WIFI_MGMT_PROBE_REQ) ? "wifi_probe" : "wifi_beacon";
     int rssi = pkt->rx_ctrl.rssi;
 
-    int idx = fyAddDetection(mac_str, "", rssi, method, "ring");  // WiFi OUIs are all Ring/Blink
+    int idx = fyAddDetection(mac_str, "", rssi, method, wcat);
     if (idx >= 0) {
         if (fyDet[idx].count == 1) {
             // First sighting — new WiFi surveillance device
             fyWifiDetCount++;
-            printf("[DANTIR] WiFi DETECTED [ring]: %s RSSI:%d [%s]\n", mac_str, rssi, method);
+            printf("[DANTIR] WiFi DETECTED [%s]: %s RSSI:%d [%s]\n", wcat, mac_str, rssi, method);
 
             // JSON serial output
             char gpsBuf[80] = "";
@@ -633,9 +645,9 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
                     ",\"gps\":{\"latitude\":%.8f,\"longitude\":%.8f,\"accuracy\":%.1f}",
                     fyGPSLat, fyGPSLon, fyGPSAcc);
             }
-            printf("{\"detection_method\":\"%s\",\"category\":\"ring\",\"protocol\":\"wifi\","
+            printf("{\"detection_method\":\"%s\",\"category\":\"%s\",\"protocol\":\"wifi\","
                    "\"mac_address\":\"%s\",\"rssi\":%d%s}\n",
-                   method, mac_str, rssi, gpsBuf);
+                   method, wcat, mac_str, rssi, gpsBuf);
         }
 
         // Defer buzzer/LED alert to main loop (can't call delay() here)
@@ -910,6 +922,18 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                 cat = "raven";
                 isRaven = true;
                 ravenFW = estimateRavenFW(dev);
+            }
+        }
+
+        // 5. Refine glasses: Meta's mfr ID covers BOTH Ray-Ban Meta (camera/surveillance
+        //    glasses) and Quest/Oculus (VR headsets) — split by device name (different
+        //    threat models). Mirrors firmware-todo #6 / shared signatures library.
+        if (cat && strcmp(cat, "glasses") == 0 && !name.empty()) {
+            std::string lname = name;
+            for (auto& c : lname) c = (char)tolower((unsigned char)c);
+            if (lname.find("quest") != std::string::npos ||
+                lname.find("oculus") != std::string::npos) {
+                cat = "vr_headset";
             }
         }
 
@@ -1602,7 +1626,7 @@ static void fySetupServer() {
         resp->print("],\"wifi_macs\":[");
         for (size_t i = 0; i < sizeof(wifi_mac_prefixes)/sizeof(wifi_mac_prefixes[0]); i++) {
             if (i > 0) resp->print(",");
-            resp->printf("\"%s\"", wifi_mac_prefixes[i]);
+            resp->printf("{\"p\":\"%s\",\"c\":\"%s\"}", wifi_mac_prefixes[i].prefix, wifi_mac_prefixes[i].category);
         }
         resp->print("],\"names\":[");
         for (size_t i = 0; i < sizeof(device_name_entries)/sizeof(device_name_entries[0]); i++) {
