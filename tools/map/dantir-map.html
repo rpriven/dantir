@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dantir Map</title>
+<!-- DANTIR-VENDOR-START -->
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css"/>
+<script src="vendor/leaflet/leaflet.js"></script>
+<!-- DANTIR-VENDOR-END -->
+<style>
+  /* Variables mirror the device dashboard's themes (purple / tactical / ithildin); setTheme() swaps them at runtime. */
+  :root { --bg-body: #0a0012; --bg-hdr: #1a0033; --bg-card: linear-gradient(135deg, rgba(45,27,105,.85), rgba(30,15,80,.78));
+          --a1: #ec4899; --a2: #8b5cf6; --a3: #c084fc; --b2: rgba(139,92,246,.35); --t1: #e0e0e0; --muted: #9a93b3; --glow: rgba(139,92,246,.3);
+          --btn: #8b5cf6; --btn-fg: #ffffff; }
+  html, body { margin: 0; height: 100%; font-family: 'Courier New', ui-monospace, Menlo, monospace; background: var(--bg-body); color: var(--t1); }
+  #map { position: absolute; inset: 0; }
+  #drop { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 24px; z-index: 2000;
+          background: radial-gradient(ellipse at center, var(--glow), var(--bg-body) 70%); }
+  #drop.hidden { display: none; }
+  #drop.over { outline: 3px dashed var(--a2); outline-offset: -16px; }
+  #drop::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .35;
+    background-image: linear-gradient(var(--b2) 1px, transparent 1px), linear-gradient(90deg, var(--b2) 1px, transparent 1px); background-size: 48px 48px; }
+  #drop > * { position: relative; }
+  #drop h1 { margin: 0; font-size: 30px; letter-spacing: 10px; color: var(--a1); text-shadow: 0 0 12px var(--a1); }
+  select.thm { background: var(--bg-hdr); color: var(--a3); border: 1px solid var(--b2); border-radius: 4px; font: inherit; font-size: 11px; letter-spacing: 1px; padding: 3px 6px; cursor: pointer; }
+  #drop .tag { color: var(--a2); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; margin-top: -8px; }
+  #drop .zone { border: 1px dashed var(--a2); border-radius: 10px; padding: 26px 40px; background: var(--bg-card); box-shadow: 0 0 18px var(--glow); display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  #drop .zone p { margin: 0; font-size: 15px; color: var(--t1); line-height: 1.6; }
+  #drop .zone .fmt { color: var(--muted); font-size: 12px; letter-spacing: 1px; }
+  #drop .fine { margin: 0; color: var(--muted); max-width: 580px; line-height: 1.55; font-size: 13px; }
+  #drop .ring { position: absolute; width: 520px; height: 520px; border-radius: 50%; border: 1px solid var(--b2); opacity: .5; pointer-events: none; animation: pulse 4s ease-in-out infinite; }
+  #drop .ring.r2 { width: 380px; height: 380px; inset: 69px; animation-delay: -1.3s; }
+  #drop .ring.r3 { width: 240px; height: 240px; inset: 69px; animation-delay: -2.6s; }
+  @keyframes pulse { 0%, 100% { opacity: .5; transform: scale(.97); } 50% { opacity: 1; transform: scale(1.02); } }
+  #drop label { display: inline-block; padding: 10px 22px; background: var(--btn); border-radius: 5px; cursor: pointer; color: var(--btn-fg); font-weight: bold; letter-spacing: 1px; border: 1px solid transparent; }
+  #drop label:hover { box-shadow: 0 0 12px var(--a1); border-color: var(--a1); }
+  #drop input { display: none; }
+  .panel { background: var(--bg-card); color: var(--t1); padding: 10px 12px; border: 1px solid var(--b2); border-left: 3px solid var(--a2); border-radius: 7px;
+           box-shadow: 0 0 14px var(--glow); line-height: 1.7; font-size: 13px; font-family: 'Courier New', ui-monospace, Menlo, monospace; backdrop-filter: blur(4px); }
+  .panel b { color: var(--a3); letter-spacing: 1px; }
+  .legend i { width: 12px; height: 12px; display: inline-block; margin-right: 6px; border-radius: 50%; vertical-align: middle; box-shadow: 0 0 6px currentColor; }
+  .legend .cat-row, .dates .date-row { cursor: pointer; user-select: none; white-space: nowrap; border-radius: 3px; padding: 0 4px; margin: 0 -4px; transition: background .12s, color .12s; }
+  .legend .cat-row:hover, .dates .date-row:hover { background: var(--b2); color: var(--a3); }
+  .legend .cat-row.off, .dates .date-row.off { opacity: .35; text-decoration: line-through; }
+  .legend .cat-row.off:hover, .dates .date-row.off:hover { opacity: .7; }
+  .panel .cat-actions, .panel .actions { margin-top: 5px; font-size: 12px; color: var(--muted); }
+  .panel .cat-actions a, .panel .actions a { cursor: pointer; text-decoration: underline; margin-right: 10px; color: var(--a3); transition: color .12s, text-shadow .12s; }
+  .panel .cat-actions a:hover, .panel .actions a:hover { color: var(--a1); text-shadow: 0 0 8px var(--a1); }
+  .stats .actions select.thm { margin-left: 2px; vertical-align: middle; }
+  .dates .date-row i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; background: var(--a2); vertical-align: middle; }
+  .dates .date-row.off i { background: #444; }
+  .leaflet-container { background: var(--bg-body); }
+  .leaflet-control-zoom a, .leaflet-control-layers, .leaflet-control-layers-toggle { background: var(--bg-hdr) !important; color: var(--t1) !important; border-color: var(--b2) !important; }
+  .leaflet-control-zoom a:hover { color: var(--a3) !important; }
+  .leaflet-control-layers { color: var(--t1); font-family: inherit; font-size: 13px; }
+  .leaflet-control-layers label:hover { color: var(--a3); }
+  /* Leaflet's layers icon is dark-on-white; draw our own as a mask so it takes the theme's accent color. */
+  .leaflet-control-layers-toggle { background-image: none !important; position: relative; }
+  .leaflet-control-layers-toggle::after { content: ""; position: absolute; inset: 0; margin: auto; width: 22px; height: 22px; background-color: var(--a3);
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'><path d='M12 3 3 8l9 5 9-5-9-5z'/><path d='m3 12 9 5 9-5'/><path d='m3 16 9 5 9-5'/></svg>") center/22px 22px no-repeat;
+            mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'><path d='M12 3 3 8l9 5 9-5-9-5z'/><path d='m3 12 9 5 9-5'/><path d='m3 16 9 5 9-5'/></svg>") center/22px 22px no-repeat; }
+  .leaflet-bar { border: 1px solid var(--b2) !important; }
+  .leaflet-control-attribution { background: rgba(10,0,18,.7) !important; color: var(--muted) !important; }
+  .leaflet-control-attribution a { color: var(--a1) !important; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--bg-hdr); color: var(--t1); border: 1px solid var(--b2); box-shadow: 0 0 14px var(--glow); }
+  .leaflet-popup-content { font-family: 'Courier New', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+  .leaflet-popup-content b { color: var(--a3); }
+  .leaflet-popup-content code { color: var(--t1); }
+  .leaflet-popup-close-button { color: var(--a3) !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="drop">
+  <div class="ring"><div class="ring r2"></div><div class="ring r3"></div></div>
+  <h1>DANTIR</h1>
+  <div class="tag">Surveillance Counter-Watcher &bull; Map &nbsp; <select class="thm" onchange="setTheme(this.value)"><option value="purple">PURPLE</option><option value="tactical">TACTICAL</option><option value="ithildin">ITHILDIN</option></select></div>
+  <div class="zone">
+    <p>Drop your exports here<br/><span class="fmt">.json &nbsp;·&nbsp; .kml &nbsp;·&nbsp; .csv</span></p>
+    <label>Choose files<input id="file" type="file" multiple accept=".json,.kml,.csv,application/json,text/csv"></label>
+  </div>
+  <p class="fine">Read in this tab, never uploaded. Only the basemap you pick talks to the network; choose <i>None</i> for fully offline.<br/>Detections without GPS are counted but not plotted. Session dates come from the filename (<code>dantir_YYYY-MM-DD_…</code>).</p>
+</div>
+<script>
+// ───────────────────────── Dantir Map renderer ─────────────────────────
+// Single renderer, two entry points: this page reads dropped files, and
+// build-map.ts embeds window.DANTIR_DATA into a copy of this same file.
+
+const COLOR_MAP = {
+  flock: "#dc143c", flock_candidate: "#ff6b6b",
+  axon: "#ff1493", axon_fixed: "#b3005c", axon_mobile: "#ff69b4",
+  lawenf: "#8b0000", lawenf_fixed: "#5a0000", lawenf_mobile: "#c0392b",
+  ring: "#1e90ff", camera: "#2e8b57", raven: "#ef4444",
+  surveillance_glasses: "#9370db", glasses: "#9370db", vr_headset: "#c9b6e4",
+  tracker: "#fb923c", wifi: "#22c55e", false_positive: "#999999", unknown: "#ffa500",
+};
+const FALSE_POSITIVE_NAMES = [  // name substring (lower-case) → reason. Only applied to mac_prefix matches.
+  ["hue", "Philips Hue lamp (OUI collision)"],
+  ["bluedriv", "BlueDriver OBD-II scanner (OUI collision)"],
+  ["wyze lock", "Wyze Lock (OUI collision)"],
+  ["ooler", "OOLER bed-cooling unit (Espressif OUI collision)"],
+  ["square reader", "Square payment reader (Espressif OUI collision)"],
+];
+// KML and CSV exports carry no category; infer one from the advertised name so those sessions
+// are not all "unknown". JSON exports keep the firmware's category. Order matters: first hit wins.
+const NAME_CATEGORY = [
+  [/^penguin-/i, "flock"], [/^flock/i, "flock"], [/^ring\b|^ring-/i, "ring"], [/^blink/i, "ring"],
+  [/wyze/i, "camera"], [/^eufy/i, "camera"], [/^arlo/i, "camera"], [/^nest ?cam/i, "camera"],
+  [/^quest\b|^pico\b/i, "vr_headset"], [/ray-?ban|meta glasses/i, "surveillance_glasses"],
+  [/^tile\b|airtag|smarttag/i, "tracker"], [/^axon\b/i, "axon"],
+];
+function categoryFromName(name) {
+  if (!name) return null;
+  for (const [re, cat] of NAME_CATEGORY) if (re.test(name)) return cat;
+  return null;
+}
+const FIXED_RADIUS_M = 150;   // seen in 2+ sessions within this radius → fixed install
+const SPLIT_FIXED_MOBILE = new Set(["axon", "lawenf"]);  // categories whose fixed/mobile distinction matters
+
+const state = { files: [], raw: [], merged: [], layers: {}, map: null, legend: null, stats: null, baseCtl: null, dates: null, offDates: new Set(), offCats: new Set(), unreadable: [] };
+
+// ── themes: the same three as the device dashboard (values copied from its TH table) ──
+const TH = {
+  purple:   { "--bg-body": "#0a0012", "--bg-hdr": "#1a0033", "--bg-card": "linear-gradient(135deg,rgba(45,27,105,.85),rgba(30,15,80,.78))",
+              "--a1": "#ec4899", "--a2": "#8b5cf6", "--a3": "#c084fc", "--b2": "rgba(139,92,246,.35)", "--t1": "#e0e0e0", "--muted": "#9a93b3", "--glow": "rgba(139,92,246,.3)",
+              "--btn": "#8b5cf6", "--btn-fg": "#ffffff" },
+  // Same name as the firmware's theme; tuned cypherpunk here: matrix-green wordmark, dark-green button with light text.
+  tactical: { "--bg-body": "#060a06", "--bg-hdr": "#0c160c", "--bg-card": "linear-gradient(135deg,rgba(12,40,18,.92),rgba(8,26,12,.85))",
+              "--a1": "#00ff41", "--a2": "#facc15", "--a3": "#7dff9a", "--b2": "rgba(0,255,65,.28)", "--t1": "#d4f4dd", "--muted": "#7fae8a", "--glow": "rgba(0,255,65,.22)",
+              "--btn": "#0b5a2a", "--btn-fg": "#d4f4dd" },
+  ithildin: { "--bg-body": "#080811", "--bg-hdr": "#0f0f1f", "--bg-card": "linear-gradient(135deg,rgba(30,41,59,.9),rgba(20,30,48,.8))",
+              "--a1": "#cbd5e1", "--a2": "#60a5fa", "--a3": "#93c5fd", "--b2": "rgba(148,163,184,.3)", "--t1": "#f1f5f9", "--muted": "#94a3b8", "--glow": "rgba(96,165,250,.25)",
+              "--btn": "#3b82f6", "--btn-fg": "#ffffff" },
+};
+function setTheme(n) {
+  const t = TH[n]; if (!t) return;
+  for (const [k, v] of Object.entries(t)) document.documentElement.style.setProperty(k, v);
+  document.querySelectorAll("select.thm").forEach(el => { el.value = n; });
+  try { localStorage.setItem("dantir_theme", n); } catch (e) {}
+}
+(function () { let n = "purple"; try { n = localStorage.getItem("dantir_theme") || "purple"; } catch (e) {} setTheme(n); })();
+
+// ── parsing ──
+function dateFromName(name, fallback) {
+  const m = name.match(/(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : fallback;
+}
+function parseJSON(text) {
+  const data = JSON.parse(text);
+  if (Array.isArray(data)) return data.filter(d => d && d.mac);
+  if (data && Array.isArray(data.detections)) return data.detections.filter(d => d && d.mac);
+  return [];
+}
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return [];
+  const cols = splitCsv(lines[0]);
+  const idx = n => cols.indexOf(n);
+  const out = [];
+  for (const line of lines.slice(1)) {
+    const c = splitCsv(line);
+    const mac = c[idx("mac")]; if (!mac) continue;
+    const num = n => { const v = c[idx(n)]; return v === undefined || v === "" ? undefined : Number(v); };
+    const d = { mac, name: c[idx("name")] || "", rssi: num("rssi"), method: c[idx("method")] || "", cat: c[idx("cat")] || c[idx("category")] || "",
+      first: num("first_seen_ms"), last: num("last_seen_ms"), count: num("count") || 1, best_rssi: num("best_rssi") };
+    const lat = num("latitude"), lon = num("longitude");
+    if (lat !== undefined && lon !== undefined) d.gps = { lat, lon, acc: num("gps_accuracy") };
+    const blat = num("best_latitude"), blon = num("best_longitude");
+    if (blat !== undefined && blon !== undefined) d.best_gps = { lat: blat, lon: blon, acc: num("best_gps_accuracy") };
+    out.push(d);
+  }
+  return out;
+}
+function splitCsv(line) {
+  const out = []; let cur = "", q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur); return out;
+}
+function parseKML(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  const out = [];
+  for (const pm of doc.getElementsByTagName("Placemark")) {
+    const mac = (pm.getElementsByTagName("name")[0]?.textContent || "").trim();
+    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac)) continue;
+    const desc = pm.getElementsByTagName("description")[0]?.textContent || "";
+    const field = k => { const m = desc.match(new RegExp("<b>" + k + ":</b>\\s*([^<]*)")); return m ? m[1].trim() : ""; };
+    const coords = (pm.getElementsByTagName("coordinates")[0]?.textContent || "").trim().split(",");
+    const d = { mac, name: field("Name"), method: field("Method"), cat: field("Category") || field("Cat"),
+      rssi: parseInt(field("RSSI")) || undefined, best_rssi: parseInt(field("Best RSSI")) || undefined, count: parseInt(field("Count")) || 1 };
+    if (coords.length >= 2) d.best_gps = { lon: Number(coords[0]), lat: Number(coords[1]), acc: parseFloat(field("Accuracy")) || undefined };
+    out.push(d);
+  }
+  return out;
+}
+function parseFile(name, text) {
+  const n = name.toLowerCase();
+  if (n.endsWith(".kml")) return parseKML(text);
+  if (n.endsWith(".csv")) return parseCSV(text);
+  return parseJSON(text);
+}
+
+// ── merge ──
+function haversineM(a, b) {
+  const R = 6371000, toR = x => x * Math.PI / 180;
+  const dLat = toR(b.lat - a.lat), dLon = toR(b.lon - a.lon);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toR(a.lat)) * Math.cos(toR(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+function falsePositive(name, method) {
+  if (!name || method !== "mac_prefix") return null;
+  const n = name.toLowerCase();
+  for (const [pat, reason] of FALSE_POSITIVE_NAMES) if (n.includes(pat)) return reason;
+  return null;
+}
+function merge(sessions) {  // sessions: [{date, name, detections}]
+  const byMac = new Map();
+  let noGps = 0;
+  for (const s of sessions) {
+    for (const d of s.detections) {
+      const mac = String(d.mac).toLowerCase();
+      const gps = d.best_gps || d.gps;
+      const rssi = Number(d.best_rssi ?? d.rssi ?? -100);
+      const count = Number(d.count) || 1;
+      let m = byMac.get(mac);
+      if (!m) {
+        m = { mac, names: [], cat: d.cat && d.cat !== "unknown" ? d.cat : "unknown", method: d.method || "unknown",
+          best_rssi: -999, total_count: 0, sessions: [], fixes: [], lat: null, lon: null, fp_reason: falsePositive(d.name, d.method) };
+        byMac.set(mac, m);
+      }
+      if (d.name && !m.names.includes(d.name)) m.names.push(d.name);
+      if (d.cat && d.cat !== "unknown" && m.cat === "unknown") m.cat = d.cat;
+      if (m.cat === "unknown" && !m.fp_reason) { const nc = categoryFromName(d.name); if (nc) m.cat = nc; }
+      if (!m.sessions.includes(s.date)) m.sessions.push(s.date);
+      m.total_count += count;
+      if (!gps) { noGps++; continue; }
+      m.fixes.push({ date: s.date, lat: gps.lat, lon: gps.lon, rssi });
+      if (rssi > m.best_rssi) { m.best_rssi = rssi; m.lat = gps.lat; m.lon = gps.lon; }
+    }
+  }
+  const merged = [];
+  for (const m of byMac.values()) {
+    m.sessions.sort();
+    const datesWithFix = new Set(m.fixes.map(f => f.date));
+    if (datesWithFix.size >= 2 && m.lat !== null) {
+      const anchor = { lat: m.lat, lon: m.lon };
+      const spread = Math.max(...m.fixes.map(f => haversineM(anchor, f)));
+      m.fixed = spread <= FIXED_RADIUS_M; m.spread_m = Math.round(spread);
+    } else { m.fixed = null; }
+    if (SPLIT_FIXED_MOBILE.has(m.cat) && m.fixed !== null) m.cat = m.cat + (m.fixed ? "_fixed" : "_mobile");
+    m.display_cat = m.fp_reason ? "false_positive" : m.cat;
+    merged.push(m);
+  }
+  merged.sort((a, b) => b.total_count - a.total_count);
+  return { merged, noGps };
+}
+
+// ── render ──
+function popupFor(m) {
+  const name = m.names.length ? m.names.join(", ") : "(unnamed)";
+  const fp = m.fp_reason ? ' <span style="color:#c00">[FALSE POSITIVE]</span><br/><i style="color:#888">' + esc(m.fp_reason) + "</i>" : "";
+  const fixed = m.fixed === null ? "" : m.fixed ? "<br/><b>Fixed install:</b> yes (spread " + m.spread_m + " m over " + m.sessions.length + " sessions)"
+                                              : "<br/><b>Fixed install:</b> no (spread " + m.spread_m + " m)";
+  return "<b>" + esc(name) + "</b>" + fp + "<br/><code>" + esc(m.mac) + "</code><br/><b>Cat:</b> " + esc(m.cat) + " &nbsp; <b>Method:</b> " + esc(m.method) +
+    "<br/><b>Best RSSI:</b> " + m.best_rssi + " dBm &nbsp; <b>Total hits:</b> " + m.total_count +
+    "<br/><b>Sessions:</b> " + m.sessions.length + " (" + m.sessions.join(", ") + ")" + fixed;
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function basemaps() {
+  const esri = "https://server.arcgisonline.com/ArcGIS/rest/services/";
+  return {
+    "ESRI Dark Gray": L.tileLayer(esri + "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri", maxZoom: 16 }),
+    "ESRI Street": L.tileLayer(esri + "World_Street_Map/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri", maxZoom: 19 }),
+    "ESRI Satellite": L.tileLayer(esri + "World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri", maxZoom: 19 }),
+    "OpenStreetMap (blocks file:// pages)": L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap contributors", maxZoom: 19 }),
+    "CARTO Voyager (watermarked without key)": L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", { subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO", maxZoom: 19 }),
+    "None (offline, no requests)": L.layerGroup(),
+  };
+}
+
+function render(allSessions) {
+  // Session-date filter: a date switched off drops that file's detections from the merge entirely,
+  // so counts, fixed-install verdicts, and markers all reflect only the dates left on.
+  const sessions = allSessions.filter(s => !state.offDates.has(s.date));
+  const { merged, noGps } = merge(sessions);
+  state.merged = merged;
+  const plotted = merged.filter(m => m.lat !== null);
+  document.getElementById("drop").classList.add("hidden");
+
+  if (!state.map) {
+    state.map = L.map("map", { preferCanvas: true });
+    const bm = basemaps();
+    // Privacy default: no basemap until the user picks one, so nothing about where the data sits leaves
+    // the machine by accident. The pick is remembered (localStorage) and ?basemap=dark|street|satellite|osm|carto|none overrides.
+    const BM_KEYS = { dark: "ESRI Dark Gray", street: "ESRI Street", satellite: "ESRI Satellite", osm: "OpenStreetMap (blocks file:// pages)", carto: "CARTO Voyager (watermarked without key)", none: "None (offline, no requests)" };
+    let pick = null;
+    const q = new URLSearchParams(location.search).get("basemap");
+    if (q && BM_KEYS[q]) pick = BM_KEYS[q];
+    if (!pick) { try { const saved = localStorage.getItem("dantir_basemap"); if (saved && bm[saved]) pick = saved; } catch (e) {} }
+    if (!pick) pick = BM_KEYS.none;
+    bm[pick].addTo(state.map);
+    state.baseCtl = L.control.layers(bm, null, { position: "topright", collapsed: true }).addTo(state.map);
+    state.map.on("baselayerchange", ev => { try { localStorage.setItem("dantir_basemap", ev.name); } catch (e) {} });
+  }
+  for (const g of Object.values(state.layers)) state.map.removeLayer(g);
+  state.layers = {};
+  const byCat = {};
+  for (const m of plotted) {
+    const cat = m.display_cat;
+    byCat[cat] = (byCat[cat] || 0) + 1;
+    if (!state.layers[cat]) state.layers[cat] = L.layerGroup().addTo(state.map);
+    const color = COLOR_MAP[cat] || COLOR_MAP.unknown;
+    L.circleMarker([m.lat, m.lon], { color, fillColor: color, fillOpacity: .7, radius: 7, weight: 2 }).bindPopup(popupFor(m)).addTo(state.layers[cat]);
+  }
+  if (plotted.length) {
+    const lats = plotted.map(m => m.lat), lons = plotted.map(m => m.lon);
+    state.map.fitBounds([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]], { padding: [30, 30], maxZoom: 15 });
+  } else {
+    state.map.setView([0, 0], 2);
+  }
+
+  // legend: every category that has markers, plus the standard ones so the list is stable
+  // Only categories that have markers, in palette order (unknown categories from newer firmware last).
+  const cats = [...Object.keys(COLOR_MAP).filter(k => byCat[k]), ...Object.keys(byCat).filter(k => !(k in COLOR_MAP))];
+  if (state.legend) state.map.removeControl(state.legend);
+  state.legend = L.control({ position: "bottomright" });
+  state.legend.onAdd = () => {
+    const div = L.DomUtil.create("div", "panel legend");
+    div.innerHTML = "<b>Categories</b><br/>" + cats.map(k =>
+      '<div class="cat-row" data-cat="' + esc(k) + '" title="click to toggle · shift-click to solo"><i style="background:' + (COLOR_MAP[k] || COLOR_MAP.unknown) + '"></i> ' + esc(k) + " (" + (byCat[k] || 0) + ")</div>").join("") +
+      '<div class="cat-actions"><a data-all="1">all</a><a data-all="0">none</a></div>';
+    L.DomEvent.disableClickPropagation(div);
+    div.addEventListener("click", ev => {
+      const row = ev.target.closest(".cat-row");
+      if (row) { if (ev.shiftKey) { allCats(false); setCat(row.dataset.cat, true); } else setCat(row.dataset.cat, row.classList.contains("off")); return; }
+      const a = ev.target.closest("a[data-all]"); if (a) allCats(a.dataset.all === "1");
+    });
+    return div;
+  };
+  state.legend.addTo(state.map);
+  for (const c of state.offCats) setCat(c, false);  // keep category toggles across date re-renders
+
+  if (state.stats) state.map.removeControl(state.stats);
+  state.stats = L.control({ position: "topleft" });
+  state.stats.onAdd = () => {
+    const div = L.DomUtil.create("div", "panel stats");
+    const dates = [...new Set(sessions.map(s => s.date))].sort();
+    div.innerHTML = "<b>Dantir Map</b><br/>" + merged.length + " unique MACs, " + plotted.length + " plotted<br/>" +
+      noGps + " detections without GPS (not plotted)<br/>" + sessions.length + " file" + (sessions.length === 1 ? "" : "s") + ", " + dates.length + " session date" + (dates.length === 1 ? "" : "s") +
+      (dates.length ? " (" + dates[0] + " → " + dates[dates.length - 1] + ")" : "") +
+      (state.map && !Object.values(state.map._layers).some(l => l instanceof L.TileLayer) ? '<br/><span style="color:var(--a2)">basemap: none (offline). Pick one from the layers icon, top-right.</span>' : "") +
+      (state.unreadable.length ? '<br/><span style="color:var(--a1)">could not read: ' + state.unreadable.map(esc).join(", ") + '</span>' : "") +
+      '<div class="actions"><a data-act="add">add files</a><a data-act="export">export merged JSON</a><a data-act="clear">clear</a>' +
+      '<select class="thm" onchange="setTheme(this.value)"><option value="purple">PURPLE</option><option value="tactical">TACTICAL</option><option value="ithildin">ITHILDIN</option></select></div>';
+    L.DomEvent.disableClickPropagation(div);
+    div.addEventListener("click", ev => {
+      const a = ev.target.closest("a[data-act]"); if (!a) return;
+      if (a.dataset.act === "add") document.getElementById("file").click();
+      if (a.dataset.act === "export") exportMerged();
+      if (a.dataset.act === "clear") { state.files = []; location.reload(); }
+    });
+    return div;
+  };
+  state.stats.addTo(state.map);
+  try { const cur = localStorage.getItem("dantir_theme") || "purple"; document.querySelectorAll("select.thm").forEach(el => { el.value = cur; }); } catch (e) {}
+
+  // dates control (bottom-left): click toggles a session date, shift-click solos it.
+  const allDates = [...new Set(allSessions.map(s => s.date))].sort();
+  if (state.dates) state.map.removeControl(state.dates);
+  state.dates = L.control({ position: "bottomleft" });
+  state.dates.onAdd = () => {
+    const div = L.DomUtil.create("div", "panel dates");
+    const perDate = {}; for (const s of allSessions) perDate[s.date] = (perDate[s.date] || 0) + s.detections.length;
+    div.innerHTML = "<b>Sessions</b><br/>" + allDates.map(d =>
+      '<div class="date-row' + (state.offDates.has(d) ? " off" : "") + '" data-date="' + esc(d) + '" title="click to toggle · shift-click to solo"><i></i>' + esc(d) + " (" + perDate[d] + ")</div>").join("") +
+      '<div class="cat-actions"><a data-dall="1">all</a><a data-dall="0">none</a></div>';
+    L.DomEvent.disableClickPropagation(div);
+    div.addEventListener("click", ev => {
+      const row = ev.target.closest(".date-row");
+      if (row) {
+        const d = row.dataset.date;
+        if (ev.shiftKey) { state.offDates = new Set(allDates.filter(x => x !== d)); }
+        else if (state.offDates.has(d)) state.offDates.delete(d); else state.offDates.add(d);
+        render(state.files); return;
+      }
+      const a = ev.target.closest("a[data-dall]");
+      if (a) { state.offDates = a.dataset.dall === "1" ? new Set() : new Set(allDates); render(state.files); }
+    });
+    return div;
+  };
+  state.dates.addTo(state.map);
+}
+function setCat(cat, on) {
+  if (on) state.offCats.delete(cat); else state.offCats.add(cat);
+  const g = state.layers[cat];
+  if (g) { if (on) g.addTo(state.map); else state.map.removeLayer(g); }
+  document.querySelectorAll('.legend .cat-row[data-cat="' + CSS.escape(cat) + '"]').forEach(el => el.classList.toggle("off", !on));
+}
+function allCats(on) {
+  const cats = new Set(Object.keys(state.layers));
+  document.querySelectorAll(".legend .cat-row").forEach(el => cats.add(el.dataset.cat));
+  cats.forEach(c => setCat(c, on));
+}
+function exportMerged() {
+  const out = state.merged.map(m => ({ mac: m.mac, names: m.names, cat: m.cat, method: m.method, lat: m.lat, lon: m.lon,
+    best_rssi: m.best_rssi, total_count: m.total_count, sessions_seen: m.sessions, fixed_install: m.fixed, spread_m: m.spread_m ?? null, false_positive_reason: m.fp_reason }));
+  const blob = new Blob([JSON.stringify({ generated: new Date().toISOString(), detections: out }, null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "dantir-merged-" + new Date().toISOString().slice(0, 10) + ".json"; a.click(); URL.revokeObjectURL(a.href);
+}
+
+// ── input ──
+async function addFiles(fileList) {
+  for (const f of fileList) {
+    const text = await f.text();
+    let detections = [];
+    try { detections = parseFile(f.name, text); } catch (e) { console.error("Could not parse " + f.name + ": " + e.message); state.unreadable.push(f.name); continue; }
+    const fallback = new Date(f.lastModified || Date.now()).toISOString().slice(0, 10);
+    state.files.push({ name: f.name, date: dateFromName(f.name, fallback), detections });
+  }
+  if (state.files.length) render(state.files);
+}
+const dropEl = document.getElementById("drop");
+document.getElementById("file").addEventListener("change", ev => addFiles(ev.target.files));
+for (const el of [dropEl, document.body]) {
+  el.addEventListener("dragover", ev => { ev.preventDefault(); dropEl.classList.add("over"); });
+  el.addEventListener("dragleave", () => dropEl.classList.remove("over"));
+  el.addEventListener("drop", ev => { ev.preventDefault(); dropEl.classList.remove("over"); addFiles(ev.dataTransfer.files); });
+}
+// Embedded data (build-map.ts) renders immediately, no drop zone.
+if (window.DANTIR_DATA && Array.isArray(window.DANTIR_DATA)) {
+  state.files = window.DANTIR_DATA.map(s => ({ name: s.name, date: s.date, detections: s.detections }));
+  render(state.files);
+}
+</script>
+</body>
+</html>

@@ -27,7 +27,7 @@ Dantir stands on the shoulders of others' work. Full respect and thanks to:
 - **[wgreenberg / flock-you](https://github.com/wgreenberg/flock-you)** — BLE
   detection research and signature work that informs how Flock devices are
   identified.
-- **[deflock.me](https://deflock.me/)** — community-sourced surveillance device
+- **[deflock.org](https://deflock.org/)** — community-sourced surveillance device
   signatures.
 
 Dantir's changes over upstream: standalone single-mode firmware (no BOOT-button
@@ -205,6 +205,24 @@ Sessions auto-save to onboard flash (SPIFFS) every ~15 s and are restored on
 boot, so a power cycle won't lose your data.
 
 ---
+
+## Map your exports
+
+`tools/map/dantir-map.html` puts your exports on a map: open it in a browser and
+drop the `.json` / `.kml` / `.csv` files from the dashboard onto it. Sessions
+merge by MAC, categories are click-to-filter, and the basemap picker includes a
+**None** option so the page makes zero network requests. Everything runs in the
+tab; nothing is uploaded. Leaflet is vendored, so no CDN either.
+
+To bake many sessions into one portable file:
+
+```
+bun tools/map/build-map.ts path/to/exports/ -o my-map.html
+```
+
+Details, formats, and the fixed-install test (same MAC on 2+ session dates within
+150 m = pole-mounted, not a passing unit): [`tools/map/README.md`](tools/map/README.md).
+Two synthetic sessions live in `tools/map/sample/` for a first try.
 
 ## Key configuration
 

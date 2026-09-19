@@ -1,0 +1,256 @@
+[
+ {
+  "mac": "02:da:02:00:00:00",
+  "name": "",
+  "rssi": -93,
+  "method": "wifi_probe",
+  "cat": "ring",
+  "first": 0,
+  "last": 5000,
+  "count": 11,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.023590071201324465,
+   "lon": -0.028443244099617,
+   "acc": 20
+  },
+  "best_rssi": -88,
+  "best_gps": {
+   "lat": 0.023790071201324463,
+   "lon": -0.028443244099617,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:01:0d:1f",
+  "name": "",
+  "rssi": -87,
+  "method": "wifi_probe",
+  "cat": "ring",
+  "first": 1000,
+  "last": 6000,
+  "count": 12,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.04714061141014099,
+   "lon": 0.029654181003570555,
+   "acc": 20
+  },
+  "best_rssi": -82,
+  "best_gps": {
+   "lat": 0.04734061141014099,
+   "lon": 0.029654181003570555,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:02:1a:3e",
+  "name": "",
+  "rssi": -87,
+  "method": "wifi_probe",
+  "cat": "ring",
+  "first": 2000,
+  "last": 7000,
+  "count": 1,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.03774668693542481,
+   "lon": 0.007780666351318362,
+   "acc": 20
+  },
+  "best_rssi": -82,
+  "best_gps": {
+   "lat": 0.03794668693542481,
+   "lon": 0.007780666351318362,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:01:03:27:5d",
+  "name": "Penguin-0000000001",
+  "rssi": -88,
+  "method": "device_name",
+  "cat": "flock",
+  "first": 3000,
+  "last": 8000,
+  "count": 9,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.05552016019821167,
+   "lon": 0.010282902717590331,
+   "acc": 20
+  },
+  "best_rssi": -83,
+  "best_gps": {
+   "lat": 0.05572016019821167,
+   "lon": 0.010282902717590331,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:04:34:7c",
+  "name": "wyze_hub",
+  "rssi": -80,
+  "method": "ble_mfr_id",
+  "cat": "camera",
+  "first": 4000,
+  "last": 9000,
+  "count": 19,
+  "raven": false,
+  "fw": ""
+ },
+ {
+  "mac": "02:da:02:05:41:9b",
+  "name": "",
+  "rssi": -91,
+  "method": "ble_mfr_id",
+  "cat": "glasses",
+  "first": 5000,
+  "last": 10000,
+  "count": 1,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.044313491582870485,
+   "lon": -0.004947545528411864,
+   "acc": 20
+  },
+  "best_rssi": -86,
+  "best_gps": {
+   "lat": 0.04451349158287048,
+   "lon": -0.004947545528411864,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:06:4e:ba",
+  "name": "Quest 3",
+  "rssi": -90,
+  "method": "device_name",
+  "cat": "vr_headset",
+  "first": 6000,
+  "last": 11000,
+  "count": 30,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.03646482031792402,
+   "lon": 0.002418229579925539,
+   "acc": 20
+  },
+  "best_rssi": -85,
+  "best_gps": {
+   "lat": 0.03666482031792402,
+   "lon": 0.002418229579925539,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:07:5b:d9",
+  "name": "",
+  "rssi": -94,
+  "method": "ble_mfr_id",
+  "cat": "lawenf",
+  "first": 7000,
+  "last": 12000,
+  "count": 29,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.06119663238525391,
+   "lon": 0.0057464218139648415,
+   "acc": 20
+  },
+  "best_rssi": -89,
+  "best_gps": {
+   "lat": 0.06139663238525391,
+   "lon": 0.0057464218139648415,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:01:08:68:f8",
+  "name": "",
+  "rssi": -90,
+  "method": "wifi_probe",
+  "cat": "axon",
+  "first": 8000,
+  "last": 13000,
+  "count": 4,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.045247919559478766,
+   "lon": 0.016102538108825684,
+   "acc": 20
+  },
+  "best_rssi": -85,
+  "best_gps": {
+   "lat": 0.045447919559478765,
+   "lon": 0.016102538108825684,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:09:75:17",
+  "name": "",
+  "rssi": -86,
+  "method": "ble_mfr_id",
+  "cat": "unknown",
+  "first": 9000,
+  "last": 14000,
+  "count": 24,
+  "raven": false,
+  "fw": ""
+ },
+ {
+  "mac": "02:da:02:0a:82:36",
+  "name": "",
+  "rssi": -89,
+  "method": "wifi_probe",
+  "cat": "ring",
+  "first": 10000,
+  "last": 15000,
+  "count": 4,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.052175946235656745,
+   "lon": 0.02201743125915527,
+   "acc": 20
+  },
+  "best_rssi": -84,
+  "best_gps": {
+   "lat": 0.052375946235656744,
+   "lon": 0.02201743125915527,
+   "acc": 15
+  }
+ },
+ {
+  "mac": "02:da:02:0b:8f:55",
+  "name": "",
+  "rssi": -77,
+  "method": "wifi_probe",
+  "cat": "ring",
+  "first": 11000,
+  "last": 16000,
+  "count": 11,
+  "raven": false,
+  "fw": "",
+  "gps": {
+   "lat": 0.042855116426944735,
+   "lon": -0.025939528942108152,
+   "acc": 20
+  },
+  "best_rssi": -72,
+  "best_gps": {
+   "lat": 0.043055116426944734,
+   "lon": -0.025939528942108152,
+   "acc": 15
+  }
+ }
+]

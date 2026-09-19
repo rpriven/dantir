@@ -14,7 +14,7 @@ research.
   detection engine and much of the BLE signature set.
 - **[flock-you](https://github.com/wgreenberg/flock-you)** by **wgreenberg** —
   BLE detection research on Flock Safety hardware.
-- **[deflock.me](https://deflock.me/)** — community-maintained, crowd-sourced
+- **[deflock.org](https://deflock.org/)** — community-maintained, crowd-sourced
   catalog of surveillance-device signatures (ALPR cameras and related gear).
 - **IEEE MA-L (OUI) registry** — public assignments mapping MAC prefixes to
   manufacturers.
