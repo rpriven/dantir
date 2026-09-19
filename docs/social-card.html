@@ -1,0 +1,29 @@
+<!-- Source for docs/social-preview.jpg (GitHub social preview, 1280x640). Open beside hero.jpg at a 1280x640 viewport and screenshot. -->
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>card</title>
+<style>
+  html,body{margin:0;background:#0a0012}
+  .card{position:relative;width:1280px;height:640px;overflow:hidden;font-family:'Courier New',ui-monospace,Menlo,monospace;color:#e0e0e0}
+  .bg{position:absolute;inset:0;background:url(hero.jpg) center/cover no-repeat}
+  .shade{position:absolute;inset:0;background:linear-gradient(90deg,rgba(10,0,18,.92) 0%,rgba(10,0,18,.78) 38%,rgba(10,0,18,.15) 68%,rgba(10,0,18,0) 100%)}
+  .grid{position:absolute;inset:0;opacity:.18;background-image:linear-gradient(rgba(139,92,246,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,.35) 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(90deg,#000 0%,#000 45%,transparent 75%);-webkit-mask-image:linear-gradient(90deg,#000 0%,#000 45%,transparent 75%)}
+  .ring{position:absolute;border-radius:50%;border:1px solid rgba(139,92,246,.35);left:120px;top:-40px;width:720px;height:720px}
+  .ring.r2{left:210px;top:50px;width:540px;height:540px;border-color:rgba(139,92,246,.28)}
+  .ring.r3{left:300px;top:140px;width:360px;height:360px;border-color:rgba(139,92,246,.22)}
+  .text{position:absolute;left:88px;top:196px}
+  h1{margin:0;font-size:84px;letter-spacing:22px;color:#ec4899;text-shadow:0 0 22px rgba(236,72,153,.85),0 0 60px rgba(236,72,153,.35);font-weight:bold}
+  .tag{margin-top:6px;color:#c084fc;font-size:22px;letter-spacing:6px;text-transform:uppercase}
+  .sub{margin-top:26px;color:#9a93b3;font-size:19px;letter-spacing:1px;line-height:1.5}
+  .sub b{color:#e0e0e0;font-weight:normal}
+  .chip{display:inline-block;margin:22px 8px 0 0;padding:6px 12px;border:1px solid rgba(139,92,246,.45);border-radius:5px;color:#c084fc;font-size:15px;letter-spacing:2px;background:rgba(26,0,51,.55)}
+</style></head><body>
+<div class="card">
+  <div class="bg"></div><div class="shade"></div><div class="grid"></div>
+  <div class="ring"></div><div class="ring r2"></div><div class="ring r3"></div>
+  <div class="text">
+    <h1>DANTIR</h1>
+    <div class="tag">Surveillance Counter-Watcher</div>
+    <div class="sub"><b>ESP32-S3 · BLE + WiFi</b><br>Sees the cameras before they see you.<br>Flock, Ring, Axon, smart glasses, trackers.</div>
+    <span class="chip">DETECT</span><span class="chip">DOCUMENT</span><span class="chip">MAP</span>
+  </div>
+</div>
+</body></html>
