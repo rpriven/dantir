@@ -2,6 +2,8 @@
 
 > *Sindarin:* **dan** (against / back) + **tir** (to watch) = *"counter-watcher."*
 
+![Every camera on the block, revealed](docs/hero.jpg)
+
 Dantir is a pocket-sized **BLE + WiFi surveillance-detection device** for the
 Seeed XIAO ESP32-S3. It passively listens for the radio signatures of
 surveillance hardware around you — Flock Safety ALPR cameras, Ring/Amazon
@@ -218,6 +220,8 @@ boot, so a power cycle won't lose your data.
 
 ## Map your exports
 
+![The drop-in map on synthetic data: category legend, session-date filter, a fixed-install popup, no basemap](docs/map-screenshot.png)
+
 `tools/map/dantir-map.html` puts your exports on a map: open it in a browser and
 drop the `.json` / `.kml` / `.csv` files from the dashboard onto it. Sessions
 merge by MAC, categories are click-to-filter, and the basemap picker includes a
@@ -233,6 +237,8 @@ bun tools/map/build-map.ts path/to/exports/ -o my-map.html
 Details, formats, and the fixed-install test (same MAC on 2+ session dates within
 150 m = pole-mounted, not a passing unit): [`tools/map/README.md`](tools/map/README.md).
 Two synthetic sessions live in `tools/map/sample/` for a first try.
+
+![The same street, before and after Dantir](docs/map-before-after.jpg)
 
 ## Key configuration
 
