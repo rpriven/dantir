@@ -2,6 +2,7 @@
 // Bake Dantir session exports into ONE self-contained HTML map.
 //
 //   bun tools/map/build-map.ts <file-or-dir> [more...] [-o out.html]
+//   bun tools/map/build-map.ts --standalone [-o out.html]     # no data: one-file drop-in page
 //
 // Walks the given files/directories for Dantir JSON exports (arrays of
 // detections with a `mac` field), embeds them into a copy of dantir-map.html
@@ -19,8 +20,10 @@ import { join, dirname, basename, resolve } from "path";
 const HERE = import.meta.dir;
 const args = process.argv.slice(2);
 let out = join(HERE, "out", "dantir-map.html");
+let standalone = false;
 const inputs: string[] = [];
 for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--standalone") { standalone = true; continue; }
   if (args[i] === "-o" || args[i] === "--out") {
     if (!args[i + 1]) { console.error("-o needs a path"); usage(); process.exit(2); }
     out = resolve(args[++i]); continue;
@@ -29,10 +32,11 @@ for (let i = 0; i < args.length; i++) {
   if (args[i].startsWith("-")) { console.error(`Unknown flag ${args[i]}`); usage(); process.exit(2); }
   inputs.push(resolve(args[i]));
 }
-if (!inputs.length) { usage(); process.exit(2); }
+if (!inputs.length && !standalone) { usage(); process.exit(2); }
 
 function usage() {
   console.log("usage: bun build-map.ts <file-or-dir> [more...] [-o out.html]");
+  console.log("       bun build-map.ts --standalone [-o out.html]   (drop-in page as ONE file, no data)");
 }
 
 type Session = { name: string; date: string; detections: unknown[] };
@@ -68,9 +72,11 @@ function collect(path: string, acc: Session[]) {
 const sessions: Session[] = [];
 for (const p of inputs) collect(p, sessions);
 sessions.sort((a, b) => a.date.localeCompare(b.date));
-if (!sessions.length) { console.error("No Dantir JSON exports found under: " + inputs.join(", ")); process.exit(1); }
-console.log(`Found ${sessions.length} session file(s):`);
-for (const s of sessions) console.log(`  ${s.date}  ${s.name}  (${s.detections.length} detections)`);
+if (!standalone) {
+  if (!sessions.length) { console.error("No Dantir JSON exports found under: " + inputs.join(", ")); process.exit(1); }
+  console.log(`Found ${sessions.length} session file(s):`);
+  for (const s of sessions) console.log(`  ${s.date}  ${s.name}  (${s.detections.length} detections)`);
+}
 
 // Inline the vendored Leaflet so the output is one file.
 const page = readFileSync(join(HERE, "dantir-map.html"), "utf8");
@@ -82,11 +88,13 @@ if (!vendorBlock.test(page)) { console.error("dantir-map.html is missing the ven
 // Device names are attacker-controlled (BLE advertisements). Inside a <script>, "</script>" and "<!--"
 // change how the browser parses the block, so every "<" in the embedded JSON becomes \u003c.
 const dataJson = JSON.stringify(sessions).replace(/</g, "\\u003c");
+const dataTag = standalone ? "" : `\n<script>window.DANTIR_DATA=${dataJson};</script>`;
 const html = page.replace(vendorBlock,
-  `<style>\n${css}\n</style>\n<script>\n${js}\n</script>\n<script>window.DANTIR_DATA=${dataJson};</script>`);
+  `<style>\n${css}\n</style>\n<script>\n${js}\n</script>${dataTag}`);
 
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, html);
 const total = sessions.reduce((n, s) => n + s.detections.length, 0);
-console.log(`Wrote ${out} (${(html.length / 1024).toFixed(0)} KB, ${total} detections across ${sessions.length} files)`);
+if (standalone) console.log(`Wrote ${out} (${(html.length / 1024).toFixed(0)} KB, standalone drop-in page, no data)`);
+else console.log(`Wrote ${out} (${(html.length / 1024).toFixed(0)} KB, ${total} detections across ${sessions.length} files)`);
 console.log("Open it in a browser. Basemap picker is top-right; choose None for zero network requests.");

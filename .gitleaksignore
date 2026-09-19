@@ -1,0 +1,5 @@
+# gitleaks false positives: base64 PNG tails (…AAAASUVORK5CYII= is the PNG IEND chunk) from Leaflet marker images
+# inlined into the standalone page match the wireguard-private-key rule. Regenerating the standalone file moves the
+# line numbers; refresh these two fingerprints from `gitleaks git --staged --verbose` when that happens.
+tools/map/dantir-map.standalone.html:wireguard-private-key:371
+tools/map/dantir-map.standalone.html:wireguard-private-key:414

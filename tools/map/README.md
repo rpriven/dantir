@@ -4,8 +4,9 @@ Put your Dantir exports on a map. One HTML file, no install, nothing uploaded.
 
 ## Quick start
 
-1. Download `dantir-map.html` and the `vendor/` folder next to it (or clone the repo).
-2. Open `dantir-map.html` in a browser.
+1. Download **`dantir-map.standalone.html`** (one file, Leaflet inlined, nothing else needed),
+   or clone the repo and use `dantir-map.html` with the `vendor/` folder beside it.
+2. Open it in a browser. Nothing is hosted anywhere; it runs from your disk.
 3. Drop your exports on it: the `.json`, `.kml`, or `.csv` files the dashboard's
    DOWNLOAD buttons give you. Drop as many as you like; sessions merge by MAC.
 
@@ -40,6 +41,9 @@ the ocean at Null Island, two devices repeated across both days).
 
 Detections without GPS (phone screen off, GPS not enabled on the dashboard) are
 counted in the stats box but cannot be plotted.
+
+The standalone file is regenerated with `bun tools/map/build-map.ts --standalone -o tools/map/dantir-map.standalone.html`
+whenever the page changes; the two are the same renderer.
 
 ## Baking many sessions into one file
 

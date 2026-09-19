@@ -13,6 +13,16 @@ It only **detects and documents**. It does not jam, spoof, or interfere with
 anything. Awareness is the point: you can't push back against what you can't
 see.
 
+## What's new
+
+- **2026-09-19 · Map your exports.** `tools/map/` is a static page you open from disk: drop
+  the dashboard's JSON/KML/CSV exports on it and see them on a map with category and
+  session-date filters, the dashboard's three themes, and a fixed-install test (same MAC
+  on 2+ dates within 150 m). Nothing is uploaded; the basemap is off until you pick one.
+  One-file download: [`tools/map/dantir-map.standalone.html`](tools/map/dantir-map.standalone.html).
+  Details in [Map your exports](#map-your-exports).
+- **2026-09-19 · deflock.me is now deflock.org** in the credits.
+
 ---
 
 ## Credits & Lineage
