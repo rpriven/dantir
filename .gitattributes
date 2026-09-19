@@ -1,0 +1,4 @@
+# Keep GitHub language stats honest: the map tool vendors Leaflet and ships a baked HTML file,
+# which otherwise outweigh the firmware and label the repo "HTML".
+tools/map/vendor/** linguist-vendored
+tools/map/dantir-map.standalone.html linguist-generated
