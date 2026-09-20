@@ -292,12 +292,21 @@ static const char* raven_service_uuids[] = {
 // DETECTION STORAGE
 // ============================================================================
 
+// Widest category string plus NUL. The field was 12 bytes until 2026-09-20,
+// when "flock_candidate" (15), "false_positive" (14) and "known_benign" (12)
+// landed and strncpy silently stored "flock_candi", "false_posit" and
+// "known_benig": every strcmp consumer (the geo-minimization gate, the
+// per-category alert table, the dashboard CSS) then missed them. Update this
+// and the static_assert below together when a longer category is added.
+#define FY_CATEGORY_LEN 16
+#define FY_LONGEST_CATEGORY "flock_candidate"
+
 struct FYDetection {
     char mac[18];
     char name[48];
     int rssi;
     char method[24];
-    char category[12];    // flock, glasses, tracker, lawenf, ring, camera, raven, wifi
+    char category[FY_CATEGORY_LEN];    // flock, glasses, tracker, lawenf, ring, camera, raven, axon, vr_headset, flock_candidate, false_positive, known_benign, unknown
     unsigned long firstSeen;
     unsigned long lastSeen;
     int count;
@@ -346,7 +355,11 @@ static unsigned long fyLastHB = 0;
 
 // Per-category alert tracking — each category beeps once, then heartbeat takes over
 #define FY_MAX_ALERTED_CATS 8
-static char fyAlertedCats[FY_MAX_ALERTED_CATS][12] = {};
+static char fyAlertedCats[FY_MAX_ALERTED_CATS][FY_CATEGORY_LEN] = {};
+static_assert(sizeof(FY_LONGEST_CATEGORY) <= FY_CATEGORY_LEN,
+              "FY_CATEGORY_LEN is too small for the longest category string");
+static_assert(sizeof(((FYDetection*)0)->category) == FY_CATEGORY_LEN,
+              "FYDetection.category and fyAlertedCats must share FY_CATEGORY_LEN");
 static int fyAlertedCatCount = 0;
 
 static bool fyCategoryAlerted(const char* cat) {
@@ -705,6 +718,7 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
                           const char* method, const char* category = "unknown",
                           bool isRaven = false, const char* ravenFW = "");
 static const char* fyConfidence(const char* method);
+static const char* fyApplyDowngrades(const char*, const char*, const char*, const char*, bool*);
 
 // Called by the WiFi driver for every frame on the AP's channel.
 // Probe requests from devices scanning (on ANY channel) are caught because
@@ -771,6 +785,12 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
     int rssi = pkt->rx_ctrl.rssi;
 
     int idx = fyAddDetection(mac_str, ssid, rssi, method, wcat);
+    // Everything below reports and alerts on the POST-downgrade category, the
+    // same one fyAddDetection stored. fyApplyDowngrades returns string
+    // literals, so wcat stays a stable pointer for the deferred alert in the
+    // main loop (fyWifiAlertCat); reading fyDet[idx].category there would
+    // point into a slot that a session clear can zero underneath it.
+    wcat = fyApplyDowngrades(mac_str, ssid, method, wcat, nullptr);
     if (idx >= 0) {
         if (fyDet[idx].count == 1) {
             // First sighting — new WiFi surveillance device
@@ -1032,6 +1052,27 @@ static const char* fyConfidence(const char* method) {
     return "low";
 }
 
+// Names come off the radio (a BLE local name, a WiFi SSID) and are printed
+// with printf into JSON, the session file, CSV (quoted) and a KML CDATA block
+// that Google Earth renders as HTML. One sanitizer, applied on first sight AND
+// on every re-sighting: quotes and backslashes for JSON/CSV, angle brackets
+// and ampersand for HTML/XML (and the CDATA terminator "]]>"), control bytes
+// for the line-based writers. Replaced with '_' so the name stays readable.
+// Before 2026-09-20 only the first-sighting path stripped quotes, so one
+// beacon with a newline in its SSID made /api/detections invalid JSON and
+// the saved session unparseable on reboot.
+static void fySanitizeName(char* dst, size_t dstSize, const char* src) {
+    size_t j = 0;
+    if (src) {
+        for (; j + 1 < dstSize && src[j]; j++) {
+            unsigned char c = (unsigned char)src[j];
+            dst[j] = (c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' ||
+                      c < 0x20 || c == 0x7f) ? '_' : (char)c;
+        }
+    }
+    dst[j] = '\0';
+}
+
 // Applied on BOTH detection paths, at the single point they converge.
 static const char* fyApplyDowngrades(const char* mac, const char* name,
                                      const char* method, const char* category,
@@ -1060,7 +1101,7 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             fyDet[i].lastSeen = millis();
             fyDet[i].rssi = rssi;
             if (name && name[0]) {
-                strncpy(fyDet[i].name, name, sizeof(fyDet[i].name) - 1);
+                fySanitizeName(fyDet[i].name, sizeof(fyDet[i].name), name);
             }
             // Refresh the category. The caller recomputes it from scratch on
             // every advertisement, so a device first seen nameless as "glasses"
@@ -1102,12 +1143,7 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
         FYDetection& d = fyDet[fyDetCount];
         memset(&d, 0, sizeof(d));
         strncpy(d.mac, mac, sizeof(d.mac) - 1);
-        // Sanitize name for JSON safety
-        if (name) {
-            for (int j = 0; j < (int)sizeof(d.name) - 1 && name[j]; j++) {
-                d.name[j] = (name[j] == '"' || name[j] == '\\') ? '_' : name[j];
-            }
-        }
+        fySanitizeName(d.name, sizeof(d.name), name);
         d.rssi = rssi;
         d.bestRSSI = rssi;  // First sighting = initial best
         strncpy(d.method, method, sizeof(d.method) - 1);
@@ -1265,8 +1301,13 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                                      method, cat ? cat : "unknown",
                                      isRaven, ravenFW);
 
-            // Human-readable log
-            const char* catStr = cat ? cat : "unknown";
+            // Log, serial JSON and the alert all use the category AFTER
+            // fyApplyDowngrades ran inside fyAddDetection. Until 2026-09-20 they
+            // used the caller's pre-downgrade `cat`, so a known_benign or
+            // false_positive device still buzzed its original threat pattern and
+            // printed category: flock on serial, and the "identified, not a
+            // threat" Morse case was unreachable.
+            const char* catStr = (idx >= 0) ? fyDet[idx].category : (cat ? cat : "unknown");
             printf("[DANTIR] DETECTED [%s]: %s %s RSSI:%d [%s] count:%d\n",
                    catStr, addrStr.c_str(), name.c_str(), rssi, method,
                    idx >= 0 ? fyDet[idx].count : 0);
@@ -1279,7 +1320,8 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                     ",\"gps\":{\"latitude\":%.8f,\"longitude\":%.8f,\"accuracy\":%.1f}",
                     fyGPSLat, fyGPSLon, fyGPSAcc);
             }
-            if (isRaven) {
+            const bool ravenNow = (idx >= 0) ? fyDet[idx].isRaven : isRaven;
+            if (ravenNow) {
                 printf("{\"detection_method\":\"%s\",\"category\":\"%s\",\"protocol\":\"bluetooth_le\","
                        "\"mac_address\":\"%s\",\"device_name\":\"%s\","
                        "\"rssi\":%d,\"is_raven\":true,\"raven_fw\":\"%s\"%s}\n",
@@ -1457,6 +1499,13 @@ static void fyRestoreSession() {
         det.rssi = d["rssi"] | 0;
         strlcpy(det.method, d["method"] | "", sizeof(det.method));
         strlcpy(det.category, d["cat"] | "unknown", sizeof(det.category));
+        // Confidence rides outside the gps block: a detection saved without a
+        // fix still has one. Until 2026-09-20 it was restored only alongside
+        // gps, so every GPS-less detection came back with an empty string,
+        // which the Morse table reads as "high". Session files written before
+        // the field existed carry no "conf"; derive it from the method the
+        // same way fyAddDetection does on first sight.
+        strlcpy(det.confidence, d["conf"] | fyConfidence(det.method), sizeof(det.confidence));
         det.firstSeen = d["first"] | 0UL;
         det.lastSeen = d["last"] | 0UL;
         det.count = d["count"] | 1;
@@ -1473,7 +1522,6 @@ static void fyRestoreSession() {
             // a carried-forward coordinate into an apparently-live fix, and the
             // next export publishes it unflagged — up to 120 s of travel away.
             det.gpsInterp = d["gps_interp"] | false;
-            strncpy(det.confidence, d["conf"] | "low", sizeof(det.confidence) - 1);
         }
 
         if (d["best_rssi"].is<int>()) {
