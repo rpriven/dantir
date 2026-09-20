@@ -786,7 +786,19 @@ function categoryFromName(name) {
 const FIXED_RADIUS_M = 150;   // seen in 2+ sessions within this radius → fixed install
 const SPLIT_FIXED_MOBILE = new Set(["axon", "lawenf"]);  // categories whose fixed/mobile distinction matters
 
-const state = { files: [], raw: [], merged: [], layers: {}, map: null, legend: null, stats: null, baseCtl: null, dates: null, offDates: new Set(), offCats: new Set(), unreadable: [] };
+const state = { files: [], raw: [], merged: [], layers: {}, map: null, legend: null, stats: null, baseCtl: null, dates: null, offDates: new Set(), offCats: new Set(), unreadable: [], showLow: false, lowHidden: 0 };
+
+// Confidence mirrors the firmware's fyConfidence(): a device's own name, its
+// manufacturer ID, a GATT service UUID or a SoftAP SSID identify a PRODUCT; a
+// MAC prefix only identifies a MODULE VENDOR (Liteon, Silicon Labs, Samsung)
+// and is a lead, not an ID. Exports written before 2026-09-20 carry no "conf"
+// field, so it is derived from the method here — otherwise every historical
+// session would vanish behind the default filter.
+const HIGH_CONF_METHODS = new Set(["device_name","ble_mfr_id","raven_uuid","flock_uuid","wifi_ssid"]);
+function confOf(d) {
+  if (d.conf === "high" || d.conf === "low") return d.conf;
+  return HIGH_CONF_METHODS.has(d.method) ? "high" : "low";
+}
 
 // ── themes: the same three as the device dashboard (values copied from its TH table) ──
 const TH = {
@@ -836,6 +848,7 @@ function parseCSV(text) {
     if (lat !== undefined && lon !== undefined) d.gps = { lat, lon, acc: num("gps_accuracy") };
     const blat = num("best_latitude"), blon = num("best_longitude");
     if (blat !== undefined && blon !== undefined) d.best_gps = { lat: blat, lon: blon, acc: num("best_gps_accuracy") };
+    const cf = field("confidence"); if (cf) d.conf = cf;
     out.push(d);
   }
   return out;
@@ -898,10 +911,11 @@ function merge(sessions) {  // sessions: [{date, name, detections}]
       const count = Number(d.count) || 1;
       let m = byMac.get(mac);
       if (!m) {
-        m = { mac, names: [], cat: d.cat && d.cat !== "unknown" ? d.cat : "unknown", method: d.method || "unknown",
+        m = { mac, names: [], conf: "low", cat: d.cat && d.cat !== "unknown" ? d.cat : "unknown", method: d.method || "unknown",
           best_rssi: -999, total_count: 0, sessions: [], fixes: [], lat: null, lon: null, fp_reason: falsePositive(d.name, d.method) };
         byMac.set(mac, m);
       }
+      if (confOf(d) === "high") m.conf = "high";
       if (d.name && !m.names.includes(d.name)) m.names.push(d.name);
       if (d.cat && d.cat !== "unknown" && m.cat === "unknown") m.cat = d.cat;
       if (m.cat === "unknown" && !m.fp_reason) { const nc = categoryFromName(d.name); if (nc) m.cat = nc; }
@@ -921,6 +935,11 @@ function merge(sessions) {  // sessions: [{date, name, detections}]
       const spread = Math.max(...m.fixes.map(f => haversineM(anchor, f)));
       m.fixed = spread <= FIXED_RADIUS_M; m.spread_m = Math.round(spread);
     } else { m.fixed = null; }
+    // Persistence IS evidence in a way a module vendor never was: the same MAC
+    // on 2+ separate dates inside FIXED_RADIUS_M is an installation, not a
+    // passer-by. That earns a low-confidence OUI hit its way into the default
+    // view, and it is the only promotion path that does not require guessing.
+    if (m.conf === "low" && m.fixed === true) { m.conf = "high"; m.promoted = true; }
     if (SPLIT_FIXED_MOBILE.has(m.cat) && m.fixed !== null) m.cat = m.cat + (m.fixed ? "_fixed" : "_mobile");
     m.display_cat = m.fp_reason ? "false_positive" : m.cat;
     merged.push(m);
@@ -936,6 +955,9 @@ function popupFor(m) {
   const fixed = m.fixed === null ? "" : m.fixed ? "<br/><b>Fixed install:</b> yes (spread " + m.spread_m + " m over " + m.sessions.length + " sessions)"
                                               : "<br/><b>Fixed install:</b> no (spread " + m.spread_m + " m)";
   return "<b>" + esc(name) + "</b>" + fp + "<br/><code>" + esc(m.mac) + "</code><br/><b>Cat:</b> " + esc(m.cat) + " &nbsp; <b>Method:</b> " + esc(m.method) +
+    "<br/><b>Confidence:</b> " + esc(m.conf) +
+    (m.promoted ? ' <span style="color:#fbbf24">(promoted: fixed install across sessions)</span>'
+                : m.conf === "low" ? ' <span style="color:#888">(vendor OUI only, a lead not an ID)</span>' : "") +
     "<br/><b>Best RSSI:</b> " + m.best_rssi + " dBm &nbsp; <b>Total hits:</b> " + m.total_count +
     "<br/><b>Sessions:</b> " + m.sessions.length + " (" + m.sessions.join(", ") + ")" + fixed;
 }
@@ -956,10 +978,12 @@ function basemaps() {
 function render(allSessions) {
   // Session-date filter: a date switched off drops that file's detections from the merge entirely,
   // so counts, fixed-install verdicts, and markers all reflect only the dates left on.
+  state.allSessions = allSessions;
   const sessions = allSessions.filter(s => !state.offDates.has(s.date));
   const { merged, noGps } = merge(sessions);
   state.merged = merged;
-  const plotted = merged.filter(m => m.lat !== null);
+  state.lowHidden = merged.filter(m => m.lat !== null && m.conf === "low").length;
+  const plotted = merged.filter(m => m.lat !== null && (state.showLow || m.conf !== "low"));
   document.getElementById("drop").classList.add("hidden");
 
   if (!state.map) {
@@ -1003,8 +1027,19 @@ function render(allSessions) {
     const div = L.DomUtil.create("div", "panel legend");
     div.innerHTML = "<b>Categories</b><br/>" + cats.map(k =>
       '<div class="cat-row" data-cat="' + esc(k) + '" title="click to toggle · shift-click to solo"><i style="background:' + (COLOR_MAP[k] || COLOR_MAP.unknown) + '"></i> ' + esc(k) + " (" + (byCat[k] || 0) + ")</div>").join("") +
-      '<div class="cat-actions"><a data-all="1">all</a><a data-all="0">none</a></div>';
+      '<div class="cat-actions"><a data-all="1">all</a><a data-all="0">none</a></div>' +
+      '<div class="cat-actions" style="border-top:1px solid var(--b2);padding-top:5px;margin-top:6px">' +
+        '<label style="cursor:pointer;user-select:none" title="A low-confidence hit matched only a module-vendor OUI (Liteon, Silicon Labs, Samsung), not anything specific to a surveillance product. Hidden by default so the map shows what we can stand behind. Nothing is discarded: they stay in the data and in every export.">' +
+          '<input type="checkbox" id="showLow"' + (state.showLow ? " checked" : "") + '> show low-confidence' +
+          (state.lowHidden ? ' <span style="color:var(--muted)">(' + state.lowHidden + ')</span>' : "") +
+        '</label></div>';
     L.DomEvent.disableClickPropagation(div);
+    div.addEventListener("change", ev => {
+      if (ev.target && ev.target.id === "showLow") {
+        state.showLow = ev.target.checked;
+        render(state.allSessions);
+      }
+    });
     div.addEventListener("click", ev => {
       const row = ev.target.closest(".cat-row");
       if (row) { if (ev.shiftKey) { allCats(false); setCat(row.dataset.cat, true); } else setCat(row.dataset.cat, row.classList.contains("off")); return; }

@@ -106,21 +106,33 @@ static const char* ble_mac_prefixes[] = {
     // 2026-09-16 firmware dump (Qualcomm MSM8953 + QCA9377, Android 8.1).
     // Highest-confidence prefix in this table: it is their corporate OUI.
     "b4:1e:52",
-    // Community OUI set (NitekryDPaul), same provenance as the block above.
-    "b8:35:32", "c0:35:32", "f4:6a:dd", "e0:0a:f6", "24:b2:b9",
-    "00:f4:8d", "d0:39:57", "e8:d0:fc", "e0:4f:43", "b8:1e:a4",
-    "70:08:94", "3c:71:bf", "58:00:e3", "5c:93:a2", "64:6e:69",
-    "48:27:ea", "a4:cf:12", "14:b5:cd",
-    // Locally-administered bit set; contributed by DeFlockJoplin.
-    "82:6b:f2"
-    // NOT ADOPTED from upstream: "00:03:7f" (Qualcomm Atheros QCA9377).
-    // Upstream added the whole /24. That OUI covers every Atheros radio ever
-    // made, so as a PREFIX it is the same false-positive class as the two
-    // removed below. The firmware dump names two EXACT MACs, and only those
-    // are specific enough to act on:
-    //   00:03:7f:50:00:01  (bdwlan30.bin / fakeboar.bin)
-    //   00:03:7f:4f:00:16  (otp30.bin)
-    // Add as full-MAC matches if/when full-MAC matching exists. Not as an OUI.
+    // Community OUI set (NitekryDPaul). Checked against the IEEE MA-L registry
+    // on 2026-09-20 before adopting; SEVEN of the 20 upstream prefixes were
+    // rejected and are listed below with the reason. These remaining ones are
+    // Liteon / Samsung / USI module-vendor blocks — the same class as the
+    // pre-existing table above, and the same LOW confidence. A mac_prefix hit
+    // is a lead, never a positive ID; device_name, ble_mfr_id and the UUID
+    // vectors are what promote it.
+    "c0:35:32", "f4:6a:dd", "e0:0a:f6", "00:f4:8d", "d0:39:57",
+    "e8:d0:fc", "e0:4f:43", "b8:1e:a4", "70:08:94", "58:00:e3",
+    "5c:93:a2", "64:6e:69", "48:27:ea"
+    //
+    // REJECTED from the upstream set, 2026-09-20, each verified against
+    // /usr/share/ieee-data/oui.txt:
+    //   "3c:71:bf", "a4:cf:12" — ESPRESSIF. This firmware runs on an Espressif
+    //     part. Adopting them makes Dantir flag other Dantirs, Heltec boards,
+    //     Meshtastic nodes and every Tasmota plug on the street as Flock. A
+    //     detector that reports its own hardware vendor as the threat is worse
+    //     than no detector.
+    //   "b8:35:32", "24:b2:b9", "14:b5:cd" — not assigned in MA-L, MA-M or
+    //     MA-S. An unregistered prefix cannot be attributed to anyone.
+    //   "82:6b:f2" — locally-administered bit set, i.e. a randomized address.
+    //     Matches by coincidence on address rotation; never a stable identifier.
+    //   "00:03:7f" — Qualcomm Atheros; covers every Atheros radio ever made.
+    //     The firmware dump names two EXACT MACs and only those are actionable:
+    //       00:03:7f:50:00:01  (bdwlan30.bin / fakeboar.bin)
+    //       00:03:7f:4f:00:16  (otp30.bin)
+    //     Add as full-MAC matches if/when full-MAC matching exists.
     // REMOVED 2026-06-23 (false-positive sources — see signatures/ audit):
     //   "04:0d:84" — Silicon Labs OUI (Wyze Lock / BlueDriver / Philips Hue), NOT Flock
     //   "08:3a:88" — Raspberry Pi Foundation OUI (millions of hobby RPis), too ambiguous
@@ -128,12 +140,14 @@ static const char* ble_mac_prefixes[] = {
     // (Penguin/Pigvision) + mfr ID 0x09C8, not these shared OUIs.
 };
 
-// Raven (Flock's gunshot / human-distress audio node) BLE OUI. Kept in its own
-// table because a hit here is cat "raven", not "flock" — ble_mac_prefixes[]
-// above is all Flock Safety and its match path hardcodes the flock category.
-// UUID matching stays the more reliable Raven vector; this is a second one.
-// firmware-todo #5, added 2026-09-20.
-static const char* ble_raven_prefixes[] = { "ec:62:60" };
+// firmware-todo #5 (add Raven OUI ec:62:60) was CLOSED WITHOUT ADOPTING IT,
+// 2026-09-20. The IEEE MA-L registry assigns ec:62:60 to ESPRESSIF INC — the
+// vendor of the ESP32-S3 this firmware runs on. As the sole identifier for the
+// raven category it would have tagged every other Dantir, every Heltec board
+// and every Meshtastic node in range as a Flock gunshot detector. The source
+// that reported it as Raven was a single field observation of one device, which
+// is consistent with a Raven using an Espressif module and says nothing about
+// the prefix. raven_service_uuids[] remains the reliable Raven vector.
 
 // Known NON-surveillance devices that share an OUI with something in the
 // tables above. An OUI match is weak evidence; a device NAME is strong, so a
@@ -295,6 +309,7 @@ struct FYDetection {
     float gpsAcc;
     bool hasGPS;
     bool gpsInterp;       // coords are a carried-forward fix, not a live one
+    char confidence[6];   // "high" | "low" — derived from method, see fyConfidence()
     // Peak-RSSI GPS — position at strongest signal (closest approach to device)
     int bestRSSI;         // Strongest (least negative) RSSI seen
     double bestGPSLat;
@@ -317,6 +332,13 @@ static bool fyPixelAlertMode = false;
 static unsigned long fyPixelAlertStart = 0;
 static unsigned long fyLastBleScan = 0;
 static volatile bool fyWifiAlertPending = false;  // Deferred from promiscuous CB
+// The promiscuous callback cannot buzz (it runs on the WiFi task), so the alert
+// is deferred to the main loop. These carry WHAT was seen across that gap. The
+// alert used to hardcode "ring" with the comment "WiFi OUIs are all Ring/Blink",
+// which stopped being true on 2026-09-20 when Flock's own b4:1e:52 went into
+// wifi_mac_prefixes: a Flock camera on WiFi would have buzzed as a doorbell.
+static volatile const char* fyWifiAlertCat  = "ring";
+static volatile const char* fyWifiAlertConf = "low";
 static int fyWifiDetCount = 0;
 static bool fyDeviceInRange = false;
 static unsigned long fyLastDetTime = 0;
@@ -490,9 +512,17 @@ static void fyMorseDah() {
 }
 
 // Play Morse pattern for a detection category
-static void fyMorseCategory(const char* category) {
+static void fyMorseCategory(const char* category, const char* confidence) {
     if (!fyBuzzerOn || !category) return;
     delay(MORSE_LEAD_MS);
+
+    // A vendor-OUI hit gets one dit, whatever the category guess is. Before
+    // this, a Liteon module got the full four-symbol Flock alert, which trains
+    // you to ignore the buzzer — and an alert you ignore is not an alert.
+    if (confidence && strcmp(confidence, "low") == 0) {
+        fyMorseDit();
+        return;
+    }
 
     if (strcmp(category, "flock") == 0) {
         // F: ··-·
@@ -518,6 +548,17 @@ static void fyMorseCategory(const char* category) {
     } else if (strcmp(category, "axon") == 0) {
         // A: ·-  (Axon ALPR — Flock's municipal replacement)
         fyMorseDit(); fyMorseDah();
+    } else if (strcmp(category, "false_positive") == 0 ||
+               strcmp(category, "known_benign") == 0) {
+        // I: ··  Two quick dits. These mean "identified, and it is NOT a threat".
+        // Without this case they fell through to the else below, which is two
+        // dahs — the loudest pattern in the table. The device was shouting
+        // hardest at the things we had positively cleared.
+        fyMorseDit(); fyMorseDit();
+    } else if (strcmp(category, "flock_candidate") == 0) {
+        // Q: --·-  Distinct from F (confirmed flock) on purpose: a candidate is
+        // a lead to go investigate, not a positive identification.
+        fyMorseDah(); fyMorseDah(); fyMorseDit(); fyMorseDah();
     } else if (strcmp(category, "vr_headset") == 0) {
         // E: ·  (single dit — VR headset, benign; quiet acknowledgement, not a threat)
         fyMorseDit();
@@ -528,13 +569,15 @@ static void fyMorseCategory(const char* category) {
     noTone(BUZZER_PIN);
 }
 
-static void fyDetectBeep(const char* category = nullptr) {
-    printf("[DANTIR] Detection alert! [%s]\n", category ? category : "?");
+static void fyDetectBeep(const char* category = nullptr,
+                         const char* confidence = "high") {
+    printf("[DANTIR] Detection alert! [%s/%s]\n", category ? category : "?",
+           confidence ? confidence : "?");
     fyPixelAlertMode = true;
     fyPixelAlertStart = millis();
     if (!fyBuzzerOn) return;
     if (category) {
-        fyMorseCategory(category);
+        fyMorseCategory(category, confidence);
     } else {
         // Fallback: original crow caw for uncategorized
         fyCaw(400, 900, 100, 30);
@@ -661,6 +704,7 @@ static bool fyGPSIsFresh();
 static int fyAddDetection(const char* mac, const char* name, int rssi,
                           const char* method, const char* category = "unknown",
                           bool isRaven = false, const char* ravenFW = "");
+static const char* fyConfidence(const char* method);
 
 // Called by the WiFi driver for every frame on the AP's channel.
 // Probe requests from devices scanning (on ANY channel) are caught because
@@ -748,6 +792,8 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
         // Defer buzzer/LED alert to main loop (can't call delay() here)
         fyDeviceInRange = true;
         fyLastDetTime = millis();
+        fyWifiAlertCat  = wcat;
+        fyWifiAlertConf = fyConfidence(method);
         fyWifiAlertPending = true;
     }
 }
@@ -930,9 +976,81 @@ static void fyProcessHardwareGPS() {
 // DETECTION MANAGEMENT
 // ============================================================================
 
+// Case-insensitive substring test against a name table.
+static bool fyNameMatchesAny(const char* name, const char* const* table, size_t n) {
+    if (!name || !name[0]) return false;
+    char low[64];
+    size_t i = 0;
+    for (; i < sizeof(low) - 1 && name[i]; i++) low[i] = (char)tolower((unsigned char)name[i]);
+    low[i] = '\0';
+    for (size_t j = 0; j < n; j++) if (strstr(low, table[j])) return true;
+    return false;
+}
+
+static bool fyIsKnownFalsePositive(const char* name) {
+    return fyNameMatchesAny(name, known_false_positives,
+                            sizeof(known_false_positives)/sizeof(known_false_positives[0]));
+}
+
+static bool fyIsKnownBenignMAC(const char* mac) {
+    for (size_t j = 0; j < sizeof(known_benign_macs)/sizeof(known_benign_macs[0]); j++) {
+        if (strcasecmp(mac, known_benign_macs[j]) == 0) return true;
+    }
+    return false;
+}
+
+// True when the ONLY thing that identified this device was a vendor OUI. Every
+// prefix table in this firmware is a module-vendor block (Liteon, Silicon Labs,
+// Samsung), not a Flock-specific assignment, so a prefix hit is a lead and a
+// device's own name outranks it. Covers the WiFi paths too: the promiscuous
+// callback matches on OUI exactly like the BLE scan does, and an earlier
+// version of this check guarded on method=="mac_prefix" alone, which silently
+// exempted every WiFi detection from the downgrades.
+static bool fyMethodIsPrefixOnly(const char* m) {
+    return m && (strcmp(m, "mac_prefix") == 0 ||
+                 strcmp(m, "wifi_probe") == 0 ||
+                 strcmp(m, "wifi_beacon") == 0);
+}
+
+// Confidence is a SEPARATE axis from category. Category says what we think the
+// device is; confidence says how we know. Every prefix table in this firmware
+// is a module-vendor block (Liteon, Silicon Labs, Samsung), never a
+// Flock-specific IEEE assignment, so an OUI hit is a lead and nothing more.
+// A device's own name, its manufacturer ID, a GATT service UUID or a SoftAP
+// SSID are specific to the product and are treated as identification.
+//
+// Keeping these two axes separate is what lets the vendor prefixes stay in the
+// table honestly: the uncertainty lives in the data instead of in a comment.
+static const char* fyConfidence(const char* method) {
+    if (!method) return "low";
+    if (strcmp(method, "device_name") == 0 ||
+        strcmp(method, "ble_mfr_id")  == 0 ||
+        strcmp(method, "raven_uuid")  == 0 ||
+        strcmp(method, "flock_uuid")  == 0 ||
+        strcmp(method, "wifi_ssid")   == 0) return "high";
+    // mac_prefix, wifi_probe, wifi_beacon, name_pattern
+    return "low";
+}
+
+// Applied on BOTH detection paths, at the single point they converge.
+static const char* fyApplyDowngrades(const char* mac, const char* name,
+                                     const char* method, const char* category,
+                                     bool* isRaven) {
+    if (fyIsKnownBenignMAC(mac)) {
+        if (isRaven) *isRaven = false;
+        return "known_benign";
+    }
+    if (fyMethodIsPrefixOnly(method) && fyIsKnownFalsePositive(name)) {
+        if (isRaven) *isRaven = false;
+        return "false_positive";
+    }
+    return category;
+}
+
 static int fyAddDetection(const char* mac, const char* name, int rssi,
                           const char* method, const char* category,
                           bool isRaven, const char* ravenFW) {
+    category = fyApplyDowngrades(mac, name, method, category, &isRaven);
     if (!fyMutex || xSemaphoreTake(fyMutex, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
 
     // Update existing by MAC
@@ -943,6 +1061,25 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             fyDet[i].rssi = rssi;
             if (name && name[0]) {
                 strncpy(fyDet[i].name, name, sizeof(fyDet[i].name) - 1);
+            }
+            // Refresh the category. The caller recomputes it from scratch on
+            // every advertisement, so a device first seen nameless as "glasses"
+            // becomes "vr_headset" once its name resolves. Without this the
+            // stale category persisted and fyCategoryMayGeoLog kept geo-logging
+            // a device we had already identified as benign. "unknown" never
+            // overwrites something more specific.
+            if (category && category[0] && strcmp(category, "unknown") != 0 &&
+                strcmp(category, fyDet[i].category) != 0) {
+                strncpy(fyDet[i].category, category, sizeof(fyDet[i].category) - 1);
+                fyDet[i].category[sizeof(fyDet[i].category) - 1] = '\0';
+            }
+            // Confidence only ever ratchets UP. A device identified by name
+            // once stays identified even if the next advertisement carries no
+            // name and falls back to the OUI.
+            if (strcmp(fyConfidence(method), "high") == 0 &&
+                strcmp(fyDet[i].confidence, "high") != 0) {
+                strncpy(fyDet[i].confidence, "high", sizeof(fyDet[i].confidence) - 1);
+                strncpy(fyDet[i].method, method, sizeof(fyDet[i].method) - 1);
             }
             // Update GPS on every re-sighting (captures movement)
             fyAttachGPS(fyDet[i]);
@@ -974,6 +1111,7 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
         d.rssi = rssi;
         d.bestRSSI = rssi;  // First sighting = initial best
         strncpy(d.method, method, sizeof(d.method) - 1);
+        strncpy(d.confidence, fyConfidence(method), sizeof(d.confidence) - 1);
         strncpy(d.category, category ? category : "unknown", sizeof(d.category) - 1);
         d.firstSeen = millis();
         d.lastSeen = millis();
@@ -1004,38 +1142,6 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
 // ============================================================================
 // BLE SCANNING
 // ============================================================================
-
-// Case-insensitive substring test against a name table.
-static bool fyNameMatchesAny(const char* name, const char* const* table, size_t n) {
-    if (!name || !name[0]) return false;
-    char low[64];
-    size_t i = 0;
-    for (; i < sizeof(low) - 1 && name[i]; i++) low[i] = (char)tolower((unsigned char)name[i]);
-    low[i] = '\0';
-    for (size_t j = 0; j < n; j++) if (strstr(low, table[j])) return true;
-    return false;
-}
-
-static bool fyIsKnownFalsePositive(const char* name) {
-    return fyNameMatchesAny(name, known_false_positives,
-                            sizeof(known_false_positives)/sizeof(known_false_positives[0]));
-}
-
-static bool fyIsKnownBenignMAC(const char* mac) {
-    for (size_t j = 0; j < sizeof(known_benign_macs)/sizeof(known_benign_macs[0]); j++) {
-        if (strcasecmp(mac, known_benign_macs[j]) == 0) return true;
-    }
-    return false;
-}
-
-static bool fyCheckRavenMACPrefix(const uint8_t* mac) {
-    char p[9];
-    snprintf(p, sizeof(p), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
-    for (size_t j = 0; j < sizeof(ble_raven_prefixes)/sizeof(ble_raven_prefixes[0]); j++) {
-        if (strncasecmp(p, ble_raven_prefixes[j], 8) == 0) return true;
-    }
-    return false;
-}
 
 // A DBC350-style hostname on a device we cannot otherwise identify. Flock has
 // shipped camera generations built on Raspberry Pi Compute Modules, so this
@@ -1072,17 +1178,8 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
         const char* cat = nullptr;
 
-        // 0. Raven OUI — checked before the Flock table so it lands in its own
-        //    category instead of being swept into "flock". firmware-todo #5.
-        if (fyCheckRavenMACPrefix(mac)) {
-            detected = true;
-            method = "mac_prefix";
-            cat = "raven";
-            isRaven = true;
-        }
-
         // 1. Check MAC prefix against known surveillance device OUIs (BLE)
-        if (!detected && checkBLEMACPrefix(mac)) {
+        if (checkBLEMACPrefix(mac)) {
             detected = true;
             method = "mac_prefix";
             cat = "flock";  // MAC prefixes are all Flock Safety OUIs
@@ -1140,15 +1237,10 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
         // 4c. Downgrades and overrides, applied last so they can veto every
         //     check above. Order matters: a benign clearance beats a false-
         //     positive name, which beats a bare OUI match.
-        if (detected && fyIsKnownBenignMAC(addrStr.c_str())) {
-            cat = "known_benign";        // field-cleared: counted, never a threat
-        } else if (detected && strcmp(method, "mac_prefix") == 0 &&
-                   fyIsKnownFalsePositive(name.c_str())) {
-            // A shared OUI said surveillance; the device's own name says it is a
-            // smart bulb / OBD dongle / smart lock. The name wins. firmware-todo #3.
-            cat = "false_positive";
-            isRaven = false;
-        } else if (!detected && fyIsFlockCandidateName(name.c_str())) {
+        // The benign-MAC and false-positive-name downgrades now live in
+        // fyAddDetection (fyApplyDowngrades), which both detection paths go
+        // through. Only the BLE-specific promotion stays here.
+        if (!detected && fyIsFlockCandidateName(name.c_str())) {
             // Nothing specific matched, but the hostname fits the RPi-based
             // camera pattern. Suggestive only. firmware-todo #4.
             detected = true;
@@ -1201,7 +1293,7 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
             if (!fyCategoryAlerted(catStr)) {
                 fyMarkCategoryAlerted(catStr);
-                fyDetectBeep(catStr);
+                fyDetectBeep(catStr, fyConfidence(method));
                 fyLastHB = millis();  // Start heartbeat countdown AFTER the alert beep
             }
             fyDeviceInRange = true;
@@ -1223,11 +1315,12 @@ static void writeDetectionsJSON(AsyncResponseStream *resp) {
                 "{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
                 "\"cat\":\"%s\","
                 "\"first\":%lu,\"last\":%lu,\"count\":%d,"
-                "\"raven\":%s,\"fw\":\"%s\"",
+                "\"raven\":%s,\"fw\":\"%s\",\"conf\":\"%s\"",
                 fyDet[i].mac, fyDet[i].name, fyDet[i].rssi, fyDet[i].method,
                 fyDet[i].category,
                 fyDet[i].firstSeen, fyDet[i].lastSeen, fyDet[i].count,
-                fyDet[i].isRaven ? "true" : "false", fyDet[i].ravenFW);
+                fyDet[i].isRaven ? "true" : "false", fyDet[i].ravenFW,
+                fyDet[i].confidence);
             // Append GPS if present (first-seen position)
             if (fyDet[i].hasGPS) {
                 resp->printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
@@ -1265,11 +1358,11 @@ static void fySaveSession() {
         f.printf("{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
                  "\"cat\":\"%s\","
                  "\"first\":%lu,\"last\":%lu,\"count\":%d,"
-                 "\"raven\":%s,\"fw\":\"%s\"",
+                 "\"raven\":%s,\"fw\":\"%s\",\"conf\":\"%s\"",
                  d.mac, d.name, d.rssi, d.method,
                  d.category,
                  d.firstSeen, d.lastSeen, d.count,
-                 d.isRaven ? "true" : "false", d.ravenFW);
+                 d.isRaven ? "true" : "false", d.ravenFW, d.confidence);
         if (d.hasGPS) {
             f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
                 d.gpsLat, d.gpsLon, d.gpsAcc, d.gpsInterp ? ",\"gps_interp\":true" : "");
@@ -1376,6 +1469,11 @@ static void fyRestoreSession() {
             det.gpsLon = gps["lon"] | 0.0;
             det.gpsAcc = gps["acc"] | 0.0f;
             det.hasGPS = true;
+            // Round-trip the interpolation flag. Without this a reboot launders
+            // a carried-forward coordinate into an apparently-live fix, and the
+            // next export publishes it unflagged — up to 120 s of travel away.
+            det.gpsInterp = d["gps_interp"] | false;
+            strncpy(det.confidence, d["conf"] | "low", sizeof(det.confidence) - 1);
         }
 
         if (d["best_rssi"].is<int>()) {
@@ -1412,7 +1510,9 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
     resp->print("<Style id=\"det\"><IconStyle><color>ff4489ec</color>"
                 "<scale>1.0</scale></IconStyle></Style>\n"
                 "<Style id=\"raven\"><IconStyle><color>ff4444ef</color>"
-                "<scale>1.2</scale></IconStyle></Style>\n");
+                "<scale>1.2</scale></IconStyle></Style>\n"
+                "<Style id=\"interp\"><IconStyle><color>8044aaaa</color>"
+                "<scale>0.8</scale></IconStyle></Style>\n");
 
     if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
         for (int i = 0; i < fyDetCount; i++) {
@@ -1424,7 +1524,9 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
             float pinAcc = d.hasBestGPS ? d.bestGPSAcc : d.gpsAcc;
             resp->print("<Placemark>\n");
             resp->printf("<name>%s</name>\n", d.mac);
-            resp->printf("<styleUrl>#%s</styleUrl>\n", d.isRaven ? "raven" : "det");
+            const bool pinIsInterp = (!d.hasBestGPS && d.gpsInterp);
+            resp->printf("<styleUrl>#%s</styleUrl>\n",
+                         pinIsInterp ? "interp" : (d.isRaven ? "raven" : "det"));
             resp->print("<description><![CDATA[");
             if (d.name[0]) resp->printf("<b>Name:</b> %s<br/>", d.name);
             resp->printf("<b>Method:</b> %s<br/>"
@@ -1432,8 +1534,22 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
                          "<b>Best RSSI:</b> %d dBm<br/>"
                          "<b>Count:</b> %d<br/>",
                          d.method, d.rssi, d.hasBestGPS ? d.bestRSSI : d.rssi, d.count);
+            resp->printf("<b>Confidence:</b> %s<br/>", d.confidence);
             if (d.isRaven) resp->printf("<b>Raven FW:</b> %s<br/>", d.ravenFW);
-            resp->printf("<b>Accuracy:</b> %.1f m", pinAcc);
+            // pinAcc is the GPS receiver's accuracy for a LIVE fix. When the
+            // pin falls back to an interpolated gps (which is exactly the
+            // !hasBestGPS case now), that number describes the fix's precision
+            // at the moment it was taken, not how far the device has travelled
+            // since. Printing it bare labelled a possibly-kilometres-stale pin
+            // "Accuracy: 5.0 m".
+            if (!d.hasBestGPS && d.gpsInterp) {
+                resp->printf("<b>Accuracy:</b> %.1f m at time of fix "
+                             "<b>(INTERPOLATED — carried forward up to %d s, "
+                             "true position may differ)</b>",
+                             pinAcc, GPS_INTERP_MS / 1000);
+            } else {
+                resp->printf("<b>Accuracy:</b> %.1f m", pinAcc);
+            }
             resp->print("]]></description>\n");
             resp->printf("<Point><coordinates>%.8f,%.8f,0</coordinates></Point>\n",
                          pinLon, pinLat);
@@ -1493,6 +1609,19 @@ font-family:inherit;font-size:11px;font-weight:bold;letter-spacing:1px;cursor:po
 .det.t-glasses{border-left-color:#e879f9}.det.t-lawenf{border-left-color:#f43f5e}
 .det.t-tracker{border-left-color:#fb923c}.det.t-camera{border-left-color:#94a3b8}
 .det.t-unknown{border-left-color:#6b7280}
+/* Cleared and candidate categories, added 2026-09-20. Muted green reads as
+   "handled, not a threat"; amber-dashed reads as "lead, go look". Without
+   these rules all three fell through to the default border and were visually
+   indistinguishable from a confirmed detection. */
+.det.t-false_positive{border-left-color:#4ade80;opacity:.6}
+.det.t-known_benign{border-left-color:#4ade80;opacity:.5}
+.det.t-flock_candidate{border-left-color:#fbbf24;border-left-style:dashed}
+/* axon and vr_headset were added 2026-06-23 and never given a rule, so both
+   rendered as generic grey "other" — axon being Flock's municipal replacement
+   and the most important new vendor on the board. Found 2026-09-20 by the
+   category-coverage probe, not by looking. */
+.det.t-axon{border-left-color:#a855f7}
+.det.t-vr_headset{border-left-color:#4ade80;opacity:.6}
 .det .mac{color:var(--a1);font-weight:bold;font-size:14px}
 .det .nm{color:var(--a3);font-size:13px;margin-left:4px}
 .det .inf{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;font-size:12px}
@@ -1546,7 +1675,7 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 <div class="rp">
 <div class="rp-h" onclick="togRadar()"><div><span class="arr" id="rArr">&#9654;</span> PROXIMITY RADAR</div><span class="rp-ct" id="rCt">0 devices</span></div>
 <div class="rp-b" id="rB"><canvas id="rC" width="280" height="280"></canvas>
-<div class="rp-lg"><span style="color:var(--bl-flock)">&#9679;</span>Flock <span style="color:var(--bl-ring)">&#9679;</span>Ring <span style="color:var(--bl-raven)">&#9679;</span>Raven <span style="color:#22c55e">&#9679;</span>WiFi <span style="color:#e879f9">&#9679;</span>Glasses <span style="color:#f43f5e">&#9679;</span>LawEnf <span style="color:#fb923c">&#9679;</span>Tracker <span style="color:var(--bl-other)">&#9679;</span>Other</div></div>
+<div class="rp-lg"><span style="color:var(--bl-flock)">&#9679;</span>Flock <span style="color:var(--bl-ring)">&#9679;</span>Ring <span style="color:var(--bl-raven)">&#9679;</span>Raven <span style="color:#22c55e">&#9679;</span>WiFi <span style="color:#e879f9">&#9679;</span>Glasses <span style="color:#f43f5e">&#9679;</span>LawEnf <span style="color:#fb923c">&#9679;</span>Tracker <span style="color:#a855f7">&#9679;</span>Axon <span style="color:#fbbf24">&#9679;</span>Candidate <span style="color:#4ade80">&#9679;</span>Cleared <span style="color:var(--bl-other)">&#9679;</span>Other</div></div>
 </div>
 <div class="ch" id="chP" style="display:none"><canvas id="chC" height="60"></canvas></div>
 <div id="dL"><div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div></div>
@@ -1631,12 +1760,18 @@ if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices
 D.sort((a,b)=>b.last-a.last);el.innerHTML=D.map(card).join('');
 document.getElementById('rCt').textContent=D.length+' device'+(D.length!==1?'s':'');}
 function card(d){const t=dtype(d);
-return '<div class="det t-'+t+'"><div class="mac">'+d.mac+(d.name?'<span class="nm">'+d.name+'</span>':'')+'</div><div class="inf">'
+return '<div class="det t-'+t+'"><div class="mac">'+d.mac+(d.name?'<span class="nm">'+esc(d.name)+'</span>':'')+'</div><div class="inf">'
 +'<span>RSSI: '+d.rssi+'</span><span>'+d.method+'</span>'
 +'<span style="color:var(--a1);font-weight:bold">&times;'+d.count+'</span>'
 +(d.raven?'<span class="rv">RAVEN '+d.fw+'</span>':'')
 +(d.best_gps?'<span style="color:#22c55e" title="Peak RSSI: '+d.best_rssi+'dBm">&#9673; '+d.best_gps.lat.toFixed(5)+','+d.best_gps.lon.toFixed(5)+'</span>':d.gps?'<span style="color:#a3e635">&#9673; '+d.gps.lat.toFixed(5)+','+d.gps.lon.toFixed(5)+'</span>':'<span style="color:#666">no gps</span>')
 +'</div></div>';}
+// Device names and SSIDs are attacker-controlled bytes off the radio. They are
+// concatenated into innerHTML below, so they are escaped here rather than
+// trusted. Added 2026-09-20 after the SSID capture path made this reachable
+// from any laptop in monitor mode, with no BLE stack and no pairing.
+function esc(t){return String(t==null?'':t).replace(/[&<>"']/g,function(c){
+return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 // === STATS ===
 function stats(){document.getElementById('sT').textContent=D.length;
 document.getElementById('sR').textContent=D.filter(d=>d.raven).length;
@@ -1696,6 +1831,9 @@ const t=dtype(det);let col=cs.getPropertyValue('--bl-other').trim();
 if(t==='raven')col=cs.getPropertyValue('--bl-raven').trim();
 else if(t==='ring')col=cs.getPropertyValue('--bl-ring').trim();
 else if(t==='flock')col=cs.getPropertyValue('--bl-flock').trim();
+else if(t==='flock_candidate')col='#fbbf24';
+else if(t==='axon')col='#a855f7';
+else if(t==='false_positive'||t==='known_benign'||t==='vr_headset')col='#4ade80';
 else if(t==='wifi')col='#22c55e';
 else if(t==='glasses')col='#e879f9';
 else if(t==='lawenf')col='#f43f5e';
@@ -1724,6 +1862,9 @@ const t=dtype(d);let col=cs.getPropertyValue('--bl-other').trim();
 if(t==='raven')col=cs.getPropertyValue('--bl-raven').trim();
 else if(t==='ring')col=cs.getPropertyValue('--bl-ring').trim();
 else if(t==='flock')col=cs.getPropertyValue('--bl-flock').trim();
+else if(t==='flock_candidate')col='#fbbf24';
+else if(t==='axon')col='#a855f7';
+else if(t==='false_positive'||t==='known_benign'||t==='vr_headset')col='#4ade80';
 else if(t==='wifi')col='#22c55e';
 else if(t==='glasses')col='#e879f9';
 else if(t==='lawenf')col='#f43f5e';
@@ -1782,7 +1923,12 @@ if(!window.isSecureContext){alert('GPS requires a secure context (HTTPS). This H
 startGPS();_gTried=true;}
 // === INIT ===
 document.getElementById('tagline').innerHTML=TAGS[Math.floor(Math.random()*TAGS.length)];
-(function(){const s=localStorage.getItem('dantir_theme')||'purple';document.getElementById('thm').value=s;if(s!=='purple')setTheme(s);})();
+// Apply unconditionally. The old form was if(s!=='purple')setTheme(s), which
+// silently assumed the baked :root block stays byte-identical to TH.purple.
+// They match today, so this was latent, not live — but the two are edited
+// independently and the day they drift, purple stops applying while the
+// selector still reads PURPLE, with nothing to point at. Fixed 2026-09-20.
+(function(){const s=localStorage.getItem('dantir_theme')||'purple';document.getElementById('thm').value=s;setTheme(s);})();
 refresh();setInterval(refresh,2500);
 function rLoop(){drawRadar();requestAnimationFrame(rLoop);}rLoop();
 </script></body></html>
@@ -1904,7 +2050,7 @@ static void fySetupServer() {
     fyServer.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *r) {
         AsyncResponseStream *resp = r->beginResponseStream("text/csv");
         resp->addHeader("Content-Disposition", "attachment; filename=\"dantir_detections.csv\"");
-        resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy,best_rssi,best_latitude,best_longitude,best_gps_accuracy,gps_interp");
+        resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy,best_rssi,best_latitude,best_longitude,best_gps_accuracy,gps_interp,confidence");
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             for (int i = 0; i < fyDetCount; i++) {
                 FYDetection& d = fyDet[i];
@@ -1920,9 +2066,10 @@ static void fySetupServer() {
                 if (d.hasBestGPS) {
                     resp->printf(",%d,%.8f,%.8f,%.1f", d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
                 } else {
-                    resp->print(",,,");
+                    resp->print(",,,,");   // 4 empty: best_rssi + 3 best_gps cols
                 }
-                resp->printf(",%s\n", (d.hasGPS && d.gpsInterp) ? "true" : "false");
+                resp->printf(",%s,%s\n", (d.hasGPS && d.gpsInterp) ? "true" : "false",
+                             d.confidence);
             }
             xSemaphoreGive(fyMutex);
         }
@@ -2158,9 +2305,10 @@ void loop() {
     // WiFi detection alert (deferred from promiscuous callback — can't buzz there)
     if (fyWifiAlertPending) {
         fyWifiAlertPending = false;
-        if (!fyCategoryAlerted("ring")) {
-            fyMarkCategoryAlerted("ring");
-            fyDetectBeep("ring");  // WiFi OUIs are all Ring/Blink
+        const char* wc = (const char*)fyWifiAlertCat;
+        if (!fyCategoryAlerted(wc)) {
+            fyMarkCategoryAlerted(wc);
+            fyDetectBeep(wc, (const char*)fyWifiAlertConf);
             fyLastHB = millis();
         }
     }
