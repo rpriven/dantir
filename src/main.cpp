@@ -100,7 +100,27 @@ static const char* ble_mac_prefixes[] = {
     "f0:82:c0", "1c:34:f1", "38:5b:44", "94:34:69", "b4:e3:f9",
     // Flock Safety — WiFi-enabled devices
     "70:c9:4e", "3c:91:80", "d8:f3:bc", "80:30:49", "14:5a:fc",
-    "74:4c:a1", "9c:2f:9d", "94:08:53", "e4:aa:ea"
+    "74:4c:a1", "9c:2f:9d", "94:08:53", "e4:aa:ea",
+    // --- Cherry-picked from upstream colonelpanichacks/flock-you, 2026-09-20 ---
+    // Flock Safety's OWN IEEE MA-L assignment (Atlanta HQ). Confirmed in the
+    // 2026-09-16 firmware dump (Qualcomm MSM8953 + QCA9377, Android 8.1).
+    // Highest-confidence prefix in this table: it is their corporate OUI.
+    "b4:1e:52",
+    // Community OUI set (NitekryDPaul), same provenance as the block above.
+    "b8:35:32", "c0:35:32", "f4:6a:dd", "e0:0a:f6", "24:b2:b9",
+    "00:f4:8d", "d0:39:57", "e8:d0:fc", "e0:4f:43", "b8:1e:a4",
+    "70:08:94", "3c:71:bf", "58:00:e3", "5c:93:a2", "64:6e:69",
+    "48:27:ea", "a4:cf:12", "14:b5:cd",
+    // Locally-administered bit set; contributed by DeFlockJoplin.
+    "82:6b:f2"
+    // NOT ADOPTED from upstream: "00:03:7f" (Qualcomm Atheros QCA9377).
+    // Upstream added the whole /24. That OUI covers every Atheros radio ever
+    // made, so as a PREFIX it is the same false-positive class as the two
+    // removed below. The firmware dump names two EXACT MACs, and only those
+    // are specific enough to act on:
+    //   00:03:7f:50:00:01  (bdwlan30.bin / fakeboar.bin)
+    //   00:03:7f:4f:00:16  (otp30.bin)
+    // Add as full-MAC matches if/when full-MAC matching exists. Not as an OUI.
     // REMOVED 2026-06-23 (false-positive sources — see signatures/ audit):
     //   "04:0d:84" — Silicon Labs OUI (Wyze Lock / BlueDriver / Philips Hue), NOT Flock
     //   "08:3a:88" — Raspberry Pi Foundation OUI (millions of hobby RPis), too ambiguous
@@ -184,6 +204,12 @@ static const WifiPrefixEntry wifi_mac_prefixes[] = {
     // Axon ALPR — catches Lightpost's 2.4GHz radio / Outpost in setup mode.
     // (Deployed Outpost is LTE-only/RF-silent; Lightpost's 5GHz is invisible to ESP32.)
     {"00:25:df","axon"},
+    // Flock Safety's own IEEE MA-L (firmware dump 2026-09-16, Qualcomm QCA9377
+    // radio). The cameras probe-request roughly every 125 ms while channel-
+    // hopping, from Qualcomm's LOWI geolocation stack, so they are noisy on
+    // WiFi. Without this row a Flock camera's WiFi traffic was invisible here;
+    // the prefix only lived in the BLE table. Added 2026-09-20.
+    {"b4:1e:52","flock"},
 };
 
 // ============================================================================
@@ -204,6 +230,13 @@ static const WifiPrefixEntry wifi_mac_prefixes[] = {
 #define RAVEN_ERROR_SERVICE         "00003500-0000-1000-8000-00805f9b34fb"
 #define RAVEN_OLD_HEALTH_SERVICE    "00001809-0000-1000-8000-00805f9b34fb"
 #define RAVEN_OLD_LOCATION_SERVICE  "00001819-0000-1000-8000-00805f9b34fb"
+
+// Flock accessory GATT service, from the same firmware dump. Deliberately NOT
+// in raven_service_uuids[]: a hit here is a Flock accessory, not a Raven
+// gunshot detector, and folding them would mis-tag the category and the
+// isRaven flag. Added 2026-09-20.
+#define FLOCK_ACCESSORY_SERVICE "e8ccbb38-9532-46a8-9fe5-1814df172e6f"
+static const char* flock_service_uuids[] = { FLOCK_ACCESSORY_SERVICE };
 
 static const char* raven_service_uuids[] = {
     RAVEN_DEVICE_INFO_SERVICE,
@@ -626,7 +659,30 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
     const uint8_t *src_mac = &frame[10];
 
     const char *wcat = checkWiFiMACPrefix(src_mac);
-    if (!wcat) return;
+
+    // SSID check (added 2026-09-20, firmware dump 2026-09-16). The camera's
+    // SoftAP name is built in WifiApService.java as the literal "Flock-" plus
+    // the last 6 characters of its WiFi MAC. Provisioned units have also been
+    // seen broadcasting a bare "Flock". An SSID hit stands on its own — it does not need an OUI
+    // match, which is the point, since it catches hardware revisions whose
+    // prefix is not in any list yet.
+    char ssid[33] = {0};
+    bool ssidFlock = false;
+    if (subtype == WIFI_MGMT_BEACON && len >= 38) {
+        // 24B management header + 12B fixed params (timestamp 8, interval 2,
+        // capability 2), then tagged IEs. Tag 0 is the SSID.
+        uint8_t ssid_len = frame[37];
+        if (frame[36] == 0 && ssid_len > 0 && ssid_len <= 32 && 38 + (int)ssid_len <= len) {
+            memcpy(ssid, &frame[38], ssid_len);
+            ssid[ssid_len] = '\0';
+            if (strncasecmp(ssid, "Flock-", 6) == 0 || strcasecmp(ssid, "Flock") == 0) {
+                ssidFlock = true;
+            }
+        }
+    }
+
+    if (!wcat && !ssidFlock) return;
+    if (ssidFlock) wcat = "flock";
 
     // Match! Build MAC string and register detection
     char mac_str[18];
@@ -634,10 +690,11 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
              src_mac[0], src_mac[1], src_mac[2],
              src_mac[3], src_mac[4], src_mac[5]);
 
-    const char *method = (subtype == WIFI_MGMT_PROBE_REQ) ? "wifi_probe" : "wifi_beacon";
+    const char *method = ssidFlock ? "wifi_ssid"
+                       : (subtype == WIFI_MGMT_PROBE_REQ) ? "wifi_probe" : "wifi_beacon";
     int rssi = pkt->rx_ctrl.rssi;
 
-    int idx = fyAddDetection(mac_str, "", rssi, method, wcat);
+    int idx = fyAddDetection(mac_str, ssid, rssi, method, wcat);
     if (idx >= 0) {
         if (fyDet[idx].count == 1) {
             // First sighting — new WiFi surveillance device
@@ -697,6 +754,21 @@ static bool checkRavenUUID(NimBLEAdvertisedDevice* device, char* out_uuid = null
         std::string str = svc.toString();
         for (size_t j = 0; j < sizeof(raven_service_uuids)/sizeof(raven_service_uuids[0]); j++) {
             if (strcasecmp(str.c_str(), raven_service_uuids[j]) == 0) {
+                if (out_uuid) strncpy(out_uuid, str.c_str(), 40);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool checkFlockUUID(NimBLEAdvertisedDevice* device, char* out_uuid = nullptr) {
+    if (!device || !device->haveServiceUUID()) return false;
+    int count = device->getServiceUUIDCount();
+    for (int i = 0; i < count; i++) {
+        std::string str = device->getServiceUUID(i).toString();
+        for (size_t j = 0; j < sizeof(flock_service_uuids)/sizeof(flock_service_uuids[0]); j++) {
+            if (strcasecmp(str.c_str(), flock_service_uuids[j]) == 0) {
                 if (out_uuid) strncpy(out_uuid, str.c_str(), 40);
                 return true;
             }
@@ -928,6 +1000,17 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                 cat = "raven";
                 isRaven = true;
                 ravenFW = estimateRavenFW(dev);
+            }
+        }
+
+        // 4b. Flock accessory GATT service (firmware-derived). Category flock,
+        //     and isRaven stays false on purpose.
+        if (!detected) {
+            char flockUUID[41] = {0};
+            if (checkFlockUUID(dev, flockUUID)) {
+                detected = true;
+                method = "flock_uuid";
+                cat = "flock";
             }
         }
 
@@ -1418,6 +1501,8 @@ let g=document.getElementById('sG'),gl=document.getElementById('sGL');
 if(s.gps_src==='hw'){g.textContent=s.gps_sats+'sat';g.style.color='#22c55e';gl.textContent='HW GPS';}
 else if(s.gps_src==='phone'){g.textContent=s.gps_tagged+'/'+s.total;g.style.color='#22c55e';gl.textContent='PHONE';}
 else if(s.gps_hw_detected){g.textContent=s.gps_sats+'sat';g.style.color='#facc15';gl.textContent='NO FIX';}
+else if(_gErr){g.textContent=_gErrTxt;g.style.color=_gErr===3?'#facc15':'#ef4444';gl.textContent='GPS E'+_gErr;}
+else if(_gW!==null){g.textContent='...';g.style.color='#facc15';gl.textContent='ACQUIRING';}
 else{g.textContent='TAP';g.style.color='#ef4444';gl.textContent='GPS';}
 if(s.device_lat&&s.device_lon)_dGPS={lat:s.device_lat,lon:s.device_lon};else _dGPS=null;
 let bt=document.getElementById('sBat'),bl=document.getElementById('sBatL');
@@ -1525,26 +1610,30 @@ h+='<div class="pg"><h3>BLE Manufacturer IDs ('+p.mfr.length+')</h3><div class="
 h+='<div class="pg"><h3>Raven UUIDs ('+p.raven.length+')</h3><div class="it">'+p.raven.map(u=>'<span style="font-size:8px">'+u+'</span>').join('')+'</div></div>';
 document.getElementById('pC').innerHTML=h;window._pL=1;}).catch(()=>{});}
 // === GPS ===
-let _gW=null,_gOk=false,_gTried=false;
+let _gW=null,_gOk=false,_gTried=false,_gErr=0,_gErrTxt='';
 // Screen Wake Lock — keep the screen on during GPS capture. Phone screen-sleep suspends the
 // page and stops geolocation (the #1 cause of GPS-less detections while walking). Re-acquire
 // when the page returns to the foreground. Needs a secure context (same flag GPS already needs).
 let _wl=null;
 async function acquireWake(){try{if('wakeLock' in navigator){_wl=await navigator.wakeLock.request('screen');_wl.addEventListener('release',function(){_wl=null;});}}catch(e){}}
-document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&_gW!==null&&_wl===null){acquireWake();}});
-function sendGPS(p){_gOk=true;let g=document.getElementById('sG');g.textContent='OK';g.style.color='#22c55e';
+document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='visible')return;if(_gW!==null&&_wl===null){acquireWake();}if(_gTried&&!_gOk){startGPS();}});
+// A restored tab (session restore or bfcache) comes back with a dead geolocation watch: the
+// callbacks never fire and the only symptom is a code-3 TIMEOUT. Re-arm on restore.
+window.addEventListener('pageshow',function(ev){if(ev.persisted&&_gTried){startGPS();}});
+function sendGPS(p){_gOk=true;_gErr=0;_gErrTxt='';let g=document.getElementById('sG');g.textContent='OK';g.style.color='#22c55e';
 fetch('/api/gps?lat='+p.coords.latitude+'&lon='+p.coords.longitude+'&acc='+(p.coords.accuracy||0)).catch(()=>{});}
-function gpsErr(e){_gOk=false;let g=document.getElementById('sG');
+function gpsErr(e){_gOk=false;_gErr=e.code;let g=document.getElementById('sG');
 var msg='ERR';if(e.code===1){msg='DENIED';g.style.color='#ef4444';alert('GPS permission denied. On iPhone, GPS requires HTTPS which this device cannot provide. On Android Chrome, tap the lock/info icon in the address bar and allow Location.');}
 else if(e.code===2){msg='N/A';g.style.color='#ef4444';}
 else if(e.code===3){msg='WAIT';g.style.color='#facc15';}
-g.textContent=msg;}
+_gErrTxt=msg;g.textContent=msg;document.getElementById('sGL').textContent='GPS E'+e.code;}
 function startGPS(){if(!navigator.geolocation){return false;}
 if(_gW!==null){navigator.geolocation.clearWatch(_gW);_gW=null;}
-let g=document.getElementById('sG');g.textContent='...';g.style.color='#facc15';
-_gW=navigator.geolocation.watchPosition(sendGPS,gpsErr,{enableHighAccuracy:true,maximumAge:5000,timeout:15000});acquireWake();return true;}
+_gErr=0;_gErrTxt='';let g=document.getElementById('sG');g.textContent='...';g.style.color='#facc15';document.getElementById('sGL').textContent='ACQUIRING';
+// 60s, not 15s: on an AP with no internet there is no A-GPS assist, so a cold satellite fix
+// routinely takes longer than 15s and reports a misleading TIMEOUT.
+_gW=navigator.geolocation.watchPosition(sendGPS,gpsErr,{enableHighAccuracy:true,maximumAge:5000,timeout:60000});acquireWake();return true;}
 function reqGPS(){if(!navigator.geolocation){alert('GPS not available in this browser.');return;}
-if(_gOk){return;}
 if(!window.isSecureContext){alert('GPS requires a secure context (HTTPS). This HTTP page may not get GPS permission.\\n\\nAndroid Chrome: try chrome://flags and enable "Insecure origins treated as secure", add http://192.168.4.1\\n\\niPhone: GPS will not work over HTTP.');}
 startGPS();_gTried=true;}
 // === INIT ===
