@@ -1109,10 +1109,23 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             // stale category persisted and fyCategoryMayGeoLog kept geo-logging
             // a device we had already identified as benign. "unknown" never
             // overwrites something more specific.
+            //
+            // Sticky categories (2026-09-20): a clearance (false_positive,
+            // known_benign) or an identification that needed the name
+            // (vr_headset) is not undone by a later advertisement that carries
+            // no name and only has the OUI to go on. Before this rule a Hue Go
+            // on a Flock prefix was cleared on its first, named sighting and
+            // flipped back to "flock" on the next nameless one, and that same
+            // call geo-logged it. Only known_benign may replace a sticky value.
             if (category && category[0] && strcmp(category, "unknown") != 0 &&
                 strcmp(category, fyDet[i].category) != 0) {
-                strncpy(fyDet[i].category, category, sizeof(fyDet[i].category) - 1);
-                fyDet[i].category[sizeof(fyDet[i].category) - 1] = '\0';
+                const bool stickyStored = strcmp(fyDet[i].category, "false_positive") == 0 ||
+                                          strcmp(fyDet[i].category, "known_benign") == 0 ||
+                                          strcmp(fyDet[i].category, "vr_headset") == 0;
+                if (!stickyStored || strcmp(category, "known_benign") == 0) {
+                    strncpy(fyDet[i].category, category, sizeof(fyDet[i].category) - 1);
+                    fyDet[i].category[sizeof(fyDet[i].category) - 1] = '\0';
+                }
             }
             // Confidence only ever ratchets UP. A device identified by name
             // once stays identified even if the next advertisement carries no
@@ -1495,7 +1508,10 @@ static void fyRestoreSession() {
         memset(&det, 0, sizeof(FYDetection));
 
         strlcpy(det.mac, d["mac"] | "", sizeof(det.mac));
-        strlcpy(det.name, d["name"] | "", sizeof(det.name));
+        // Sanitized again on the way back in: a session file written by a
+        // build before fySanitizeName covered the re-sighting path can carry
+        // a raw name, and every writer downstream trusts fyDet.
+        fySanitizeName(det.name, sizeof(det.name), d["name"] | "");
         det.rssi = d["rssi"] | 0;
         strlcpy(det.method, d["method"] | "", sizeof(det.method));
         strlcpy(det.category, d["cat"] | "unknown", sizeof(det.category));
@@ -2102,8 +2118,14 @@ static void fySetupServer() {
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             for (int i = 0; i < fyDetCount; i++) {
                 FYDetection& d = fyDet[i];
-                resp->printf("\"%s\",\"%s\",%d,\"%s\",%lu,%lu,%d,%s,\"%s\"",
-                    d.mac, d.name, d.rssi, d.method,
+                // Spreadsheets evaluate a quoted cell that starts with = + - @
+                // as a formula. A radio name is attacker-chosen, so prefix
+                // those with an apostrophe; quotes, backslashes and control
+                // bytes are already gone via fySanitizeName.
+                const char c0 = d.name[0];
+                const char* csvGuard = (c0 == '=' || c0 == '+' || c0 == '-' || c0 == '@') ? "'" : "";
+                resp->printf("\"%s\",\"%s%s\",%d,\"%s\",%lu,%lu,%d,%s,\"%s\"",
+                    d.mac, csvGuard, d.name, d.rssi, d.method,
                     d.firstSeen, d.lastSeen, d.count,
                     d.isRaven ? "true" : "false", d.ravenFW);
                 if (d.hasGPS) {
@@ -2191,8 +2213,14 @@ static void fySetupServer() {
                 resp->printf("<Placemark><name>%s</name>\n", d["mac"] | "?");
                 resp->printf("<styleUrl>#%s</styleUrl>\n", isRaven ? "raven" : "det");
                 resp->print("<description><![CDATA[");
-                if (d["name"].is<const char*>() && strlen(d["name"] | "") > 0)
-                    resp->printf("<b>Name:</b> %s<br/>", d["name"] | "");
+                if (d["name"].is<const char*>() && strlen(d["name"] | "") > 0) {
+                    // This writer reads the saved file directly, not fyDet, so
+                    // it sanitizes for itself: the description is a CDATA block
+                    // Google Earth renders as HTML.
+                    char safeName[48];
+                    fySanitizeName(safeName, sizeof(safeName), d["name"] | "");
+                    resp->printf("<b>Name:</b> %s<br/>", safeName);
+                }
                 resp->printf("<b>Method:</b> %s<br/><b>RSSI:</b> %d<br/>",
                     d["method"] | "?", d["rssi"] | 0);
                 if (d["best_rssi"])
