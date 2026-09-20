@@ -17,6 +17,18 @@ see.
 
 ## What's new
 
+- **2026-09-20 · Confidence is a field, not a comment.** Every detection now carries
+  `conf: high|low`. A device's own name, manufacturer ID, GATT UUID or SoftAP SSID is
+  `high`; any bare OUI-prefix match is `low`. Low-confidence hits are logged and exported
+  but sound as a single dit and stay off the map by default. Flock cameras are also caught
+  by their SoftAP name (`Flock-` + six hex, or bare `Flock`), which needs no OUI at all.
+  Three new categories: `flock_candidate` (a lead to go look at), `false_positive` and
+  `known_benign` (identified, not a threat). Your field-cleared device list moved to a
+  gitignored `src/known_benign_local.h`. Two Espressif OUIs that had crept into the
+  Flock table were removed; every prefix is now checked against the IEEE registry.
+  Hardening from a pre-push audit: radio-supplied names are sanitized on every path
+  (JSON, CSV, KML, dashboard), cleared devices stay cleared across nameless re-sightings,
+  and the category field was widened so the new names no longer truncate.
 - **2026-09-19 · Map your exports.** `tools/map/` is a static page you open from disk: drop
   the dashboard's JSON/KML/CSV exports on it and see them on a map with category and
   session-date filters, the dashboard's three themes, and a fixed-install test (same MAC
@@ -51,19 +63,25 @@ radar dashboard, and peak-RSSI GPS tracking.
 
 ## What it detects
 
-Dantir uses **seven detection methods** across BLE and WiFi:
+Dantir uses **nine detection methods** across BLE and WiFi. Each one sets the
+detection's **confidence**: `high` means the device identified itself, `low` means
+only a vendor prefix matched.
 
-| Method | Radio | How it matches |
-|--------|-------|----------------|
-| `mac_prefix` | BLE | MAC OUI against the Flock Safety prefix set (lowest confidence — see note) |
-| `device_name` | BLE | Advertised name patterns (Flock, Penguin, Pigvision, Ring, Ray-Ban…) |
-| `ble_mfr_id` | BLE | Bluetooth manufacturer company IDs |
-| `raven_uuid` | BLE | Raven gunshot-detector service UUIDs (+ firmware-version estimate) |
-| `wifi_probe` | WiFi | Probe-request source MAC OUI (promiscuous mode) |
-| `wifi_beacon` | WiFi | Beacon-frame source MAC OUI (promiscuous mode) |
+| Method | Radio | Confidence | How it matches |
+|--------|-------|:----------:|----------------|
+| `device_name` | BLE | high | Advertised name patterns (Flock, Penguin, Pigvision, Ring, Ray-Ban…) |
+| `ble_mfr_id` | BLE | high | Bluetooth manufacturer company IDs |
+| `raven_uuid` | BLE | high | Raven gunshot-detector service UUIDs (+ firmware-version estimate) |
+| `flock_uuid` | BLE | high | Flock accessory GATT service UUIDs |
+| `wifi_ssid` | WiFi | high | Beacon SSID `Flock-` + six hex (the camera's SoftAP name) or bare `Flock` |
+| `name_pattern` | BLE | low | A hostname pattern Flock has shipped on (`DBC350…`) with nothing else to go on; yields `flock_candidate` |
+| `mac_prefix` | BLE | low | MAC OUI against the prefix set |
+| `wifi_probe` | WiFi | low | Probe-request source MAC OUI (promiscuous mode) |
+| `wifi_beacon` | WiFi | low | Beacon-frame source MAC OUI (promiscuous mode) |
 
-Detections are grouped into **ten categories**, each with its own Morse-code
-audio signature on the buzzer:
+Detections are grouped into **thirteen categories**. High-confidence hits beep the
+category's Morse letter; low-confidence hits beep one dit whatever the category, so a
+shared vendor prefix can never sound like a confirmed camera:
 
 | Category | Morse | What it covers |
 |----------|:-----:|----------------|
@@ -77,15 +95,20 @@ audio signature on the buzzer:
 | `camera`     | ··· (S)  | Other surveillance cameras (Hikvision, Arlo, Wyze) |
 | `raven`      | ···- (V) | Raven gunshot-detector nodes |
 | `wifi`       | ·-- (W)  | Generic WiFi-side detections |
+| `flock_candidate` | --·- (Q) | A lead worth a look, not an identification (today only produced by `name_pattern`, so it sounds as one dit under the low-confidence rule) |
+| `false_positive` | ·· (I) | A prefix hit whose name proves it is something else (a Hue lamp, a Wyze lock, an OBD-II dongle) |
+| `known_benign` | ·· (I) | On your own field-cleared list (see [Key configuration](#key-configuration)) |
 
-> **Detection is signature-based, not proof.** Many OUIs are shared across a
-> chipset vendor's entire catalog, so a bare `mac_prefix` match is the
-> lowest-confidence signal. Treat `device_name`, `ble_mfr_id`, and `raven_uuid`
-> hits as higher confidence, and confirm visually before drawing conclusions.
-> Known shared-OUI false-positive sources — e.g. a Silicon Labs prefix that also
-> covers Wyze locks and OBD-II dongles, and the Raspberry Pi prefix — have been
-> pulled from the Flock list; real Flock-on-RPi now relies on name (Penguin /
-> Pigvision) and manufacturer ID, not a bare OUI.
+> **Detection is signature-based, not proof.** Every prefix in the table is a
+> module-vendor block (Liteon, Silicon Labs, Samsung…), never a Flock-specific
+> IEEE assignment, so an OUI hit is a lead and nothing more; that is exactly what
+> the `low` confidence label says, in the data rather than in a comment. Confirm
+> visually before drawing conclusions. Every prefix is checked against the IEEE
+> registry before adoption: two Espressif blocks that a community list had labelled
+> Raven and Flock would have flagged every other ESP32 in range, and were rejected.
+> `false_positive` and `known_benign` are never geo-logged, and neither is
+> `unknown` or `vr_headset`: a detection you cannot name, or one you have cleared,
+> is counted but its coordinates are not written anywhere.
 
 ---
 
@@ -204,14 +227,21 @@ The onboard server (port 80) exposes a small JSON API used by the dashboard:
 
 ## Data & exports
 
-Each detection records MAC, name, RSSI, detection method, category, first/last
-seen, re-sighting count, Raven flag + firmware estimate, and **two** GPS fixes:
-first-seen and peak-RSSI (closest approach). Exports:
+Each detection records MAC, name, RSSI, detection method, category, confidence
+(`conf`: `high` or `low`), first/last seen, re-sighting count, Raven flag +
+firmware estimate, and **two** GPS fixes: first-seen and peak-RSSI (closest
+approach). A first-seen fix that was carried forward from an earlier reading is
+flagged `gps_interp` so it is never mistaken for a live position. Exports:
 
 - **JSON** — full structured record incl. `gps` and `best_gps` objects.
-- **CSV** — flat table for spreadsheets/analysis.
+- **CSV** — flat table for spreadsheets/analysis; `confidence` is the last column.
 - **KML** — placemarks for Google Earth; uses the peak-RSSI position when
-  available for the most accurate location.
+  available for the most accurate location, and labels an interpolated pin as such.
+
+Device names come off the radio and are attacker-controlled, so they are sanitized
+on every path before they reach an export or the dashboard (quotes, backslashes,
+angle brackets, ampersands and control bytes become `_`; a CSV name that starts
+with `=`, `+`, `-` or `@` is prefixed so a spreadsheet will not evaluate it).
 
 Sessions auto-save to onboard flash (SPIFFS) every ~15 s and are restored on
 boot, so a power cycle won't lose your data.
@@ -252,6 +282,13 @@ Tunable `#define`s at the top of `src/main.cpp`:
 | `BATTERY_FULL_V` / `BATTERY_EMPTY_V` | 4.2 V / 3.0 V | LiPo range |
 | `FY_AP_SSID` / `FY_AP_PASS` | `dantir` / `dantir123` | Dashboard AP credentials |
 | `FY_SAVE_INTERVAL` | 15000 ms | Session auto-save interval |
+
+**Your field-cleared device list** lives outside the source: copy
+`src/known_benign_local.h.example` to `src/known_benign_local.h` and add the MACs of
+devices you physically checked and found harmless. They are counted, never alerted as
+a threat, never geo-logged. The file is in `.gitignore` on purpose: a list of cleared
+devices is a list of specific homes near where you drive, and one commit would publish
+it. Without the file the firmware builds with an empty list.
 
 ---
 
