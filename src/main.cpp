@@ -128,6 +128,31 @@ static const char* ble_mac_prefixes[] = {
     // (Penguin/Pigvision) + mfr ID 0x09C8, not these shared OUIs.
 };
 
+// Raven (Flock's gunshot / human-distress audio node) BLE OUI. Kept in its own
+// table because a hit here is cat "raven", not "flock" — ble_mac_prefixes[]
+// above is all Flock Safety and its match path hardcodes the flock category.
+// UUID matching stays the more reliable Raven vector; this is a second one.
+// firmware-todo #5, added 2026-09-20.
+static const char* ble_raven_prefixes[] = { "ec:62:60" };
+
+// Known NON-surveillance devices that share an OUI with something in the
+// tables above. An OUI match is weak evidence; a device NAME is strong, so a
+// name hit here overrides the prefix and the detection is filed
+// "false_positive" rather than silently inflating the flock count.
+// Field evidence: Hue Go (34 hits / 3 sessions), BlueDriver OBD-II (8), Wyze
+// Lock (3), all previously tagged flock. firmware-todo #3, added 2026-09-20.
+static const char* known_false_positives[] = {
+    "hue", "bluedriv", "wyze", "philips", "obdii", "obd-ii"
+};
+
+// Locally field-cleared devices: physically searched for and not found to be
+// surveillance. Counted, never categorized as a threat.
+// LEAVE THIS EMPTY IN THE PUBLIC REPO. A MAC here is a specific device at a
+// specific place, so filling it in upstream would publish the maintainer's
+// neighbourhood. Populate it in your own working copy and do not commit it.
+// firmware-todo #4, added 2026-09-20.
+static const char* known_benign_macs[] = { };
+
 // ============================================================================
 // DETECTION CATEGORIES
 // ============================================================================
@@ -269,6 +294,7 @@ struct FYDetection {
     double gpsLon;
     float gpsAcc;
     bool hasGPS;
+    bool gpsInterp;       // coords are a carried-forward fix, not a live one
     // Peak-RSSI GPS — position at strongest signal (closest approach to device)
     int bestRSSI;         // Strongest (least negative) RSSI seen
     double bestGPSLat;
@@ -331,6 +357,12 @@ static float  fyGPSAcc = 0;
 static bool   fyGPSValid = false;
 static unsigned long fyGPSLastUpdate = 0;
 #define GPS_STALE_MS 30000  // GPS considered stale after 30s without update
+// Orphan-detection GPS fallback (firmware-todo #2). Past GPS_STALE_MS a fix is
+// no longer "where we are", but for up to GPS_INTERP_MS it is still a far better
+// answer than nothing: at driving speed two minutes is coarse, at walking speed
+// it is close. Such coords are flagged gps_interp so downstream can render them
+// differently and never mistake them for a live fix.
+#define GPS_INTERP_MS 120000
 
 // Hardware GPS state (Seeed L76K GNSS module on UART1)
 static TinyGPSPlus fyGPS;
@@ -801,9 +833,42 @@ static bool fyGPSIsFresh() {
     return fyGPSValid && (millis() - fyGPSLastUpdate < GPS_STALE_MS);
 }
 
+// GPS data-minimization gate (firmware-todo #10, raised 2026-06-23).
+// A detection we cannot name, or one we have positively identified as NOT
+// surveillance, is counted but never geo-logged. Recording precise coordinates
+// to track a neighbour's VR headset or an unidentified radio is a self-inflicted
+// doxx surface with no analytic payoff, and it is the bulk of what a leaked
+// export would reveal. Surveillance categories are unaffected.
+static bool fyCategoryMayGeoLog(const char* cat) {
+    if (!cat || !cat[0]) return false;
+    // "flock_candidate" is deliberately NOT here: it is a genuine unknown that
+    // may be surveillance, and its coordinates are what the fixed-install
+    // persistence test needs in order to resolve it either way.
+    static const char* denied[] = {
+        "unknown", "vr_headset", "false_positive", "known_benign"
+    };
+    for (size_t i = 0; i < sizeof(denied)/sizeof(denied[0]); i++) {
+        if (strcasecmp(cat, denied[i]) == 0) return false;
+    }
+    return true;
+}
+
 static void fyAttachGPS(FYDetection& d) {
+    if (!fyCategoryMayGeoLog(d.category)) return;
     if (fyGPSIsFresh()) {
         d.hasGPS = true;
+        d.gpsInterp = false;
+        d.gpsLat = fyGPSLat;
+        d.gpsLon = fyGPSLon;
+        d.gpsAcc = fyGPSAcc;
+        return;
+    }
+    // Stale but recent: carry the last known fix forward, flagged. Never let an
+    // interpolated fix overwrite a live one already attached to this detection.
+    if (fyGPSValid && !(d.hasGPS && !d.gpsInterp) &&
+        (millis() - fyGPSLastUpdate) < GPS_INTERP_MS) {
+        d.hasGPS = true;
+        d.gpsInterp = true;
         d.gpsLat = fyGPSLat;
         d.gpsLon = fyGPSLon;
         d.gpsAcc = fyGPSAcc;
@@ -882,7 +947,8 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             // Update GPS on every re-sighting (captures movement)
             fyAttachGPS(fyDet[i]);
             // Track peak RSSI — strongest signal = closest approach to device
-            if (rssi > fyDet[i].bestRSSI && fyGPSIsFresh()) {
+            if (rssi > fyDet[i].bestRSSI && fyGPSIsFresh() &&
+                fyCategoryMayGeoLog(fyDet[i].category)) {
                 fyDet[i].bestRSSI = rssi;
                 fyDet[i].bestGPSLat = fyGPSLat;
                 fyDet[i].bestGPSLon = fyGPSLon;
@@ -916,8 +982,11 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
         strncpy(d.ravenFW, ravenFW ? ravenFW : "", sizeof(d.ravenFW) - 1);
         // Attach GPS from phone (first-seen position)
         fyAttachGPS(d);
-        // Initialize best GPS to first-seen GPS
-        if (d.hasGPS) {
+        // Initialize best GPS to first-seen GPS. Never seed it from an
+        // interpolated fix: best_gps is the peak-RSSI position and the map pins
+        // on it in preference to gps, so a carried-forward coord here would
+        // silently become the plotted location of the device.
+        if (d.hasGPS && !d.gpsInterp) {
             d.bestGPSLat = d.gpsLat;
             d.bestGPSLon = d.gpsLon;
             d.bestGPSAcc = d.gpsAcc;
@@ -935,6 +1004,51 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
 // ============================================================================
 // BLE SCANNING
 // ============================================================================
+
+// Case-insensitive substring test against a name table.
+static bool fyNameMatchesAny(const char* name, const char* const* table, size_t n) {
+    if (!name || !name[0]) return false;
+    char low[64];
+    size_t i = 0;
+    for (; i < sizeof(low) - 1 && name[i]; i++) low[i] = (char)tolower((unsigned char)name[i]);
+    low[i] = '\0';
+    for (size_t j = 0; j < n; j++) if (strstr(low, table[j])) return true;
+    return false;
+}
+
+static bool fyIsKnownFalsePositive(const char* name) {
+    return fyNameMatchesAny(name, known_false_positives,
+                            sizeof(known_false_positives)/sizeof(known_false_positives[0]));
+}
+
+static bool fyIsKnownBenignMAC(const char* mac) {
+    for (size_t j = 0; j < sizeof(known_benign_macs)/sizeof(known_benign_macs[0]); j++) {
+        if (strcasecmp(mac, known_benign_macs[j]) == 0) return true;
+    }
+    return false;
+}
+
+static bool fyCheckRavenMACPrefix(const uint8_t* mac) {
+    char p[9];
+    snprintf(p, sizeof(p), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
+    for (size_t j = 0; j < sizeof(ble_raven_prefixes)/sizeof(ble_raven_prefixes[0]); j++) {
+        if (strncasecmp(p, ble_raven_prefixes[j], 8) == 0) return true;
+    }
+    return false;
+}
+
+// A DBC350-style hostname on a device we cannot otherwise identify. Flock has
+// shipped camera generations built on Raspberry Pi Compute Modules, so this
+// pattern is suggestive and nothing more — it is filed "flock_candidate", never
+// "flock". The RPi OUI itself (08:3a:88) stays OUT of the prefix table: it
+// covers millions of hobby boards and produced false flock tags before it was
+// removed on 2026-06-23. Promotion to flock requires a second, specific vector
+// (mfr ID 0x09C8 or a known Flock device name), which the ordering below gives
+// for free since those checks run first. firmware-todo #4.
+static bool fyIsFlockCandidateName(const char* name) {
+    static const char* pats[] = { "dbc350" };
+    return fyNameMatchesAny(name, pats, sizeof(pats)/sizeof(pats[0]));
+}
 
 class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* dev) override {
@@ -958,8 +1072,17 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
         const char* cat = nullptr;
 
+        // 0. Raven OUI — checked before the Flock table so it lands in its own
+        //    category instead of being swept into "flock". firmware-todo #5.
+        if (fyCheckRavenMACPrefix(mac)) {
+            detected = true;
+            method = "mac_prefix";
+            cat = "raven";
+            isRaven = true;
+        }
+
         // 1. Check MAC prefix against known surveillance device OUIs (BLE)
-        if (checkBLEMACPrefix(mac)) {
+        if (!detected && checkBLEMACPrefix(mac)) {
             detected = true;
             method = "mac_prefix";
             cat = "flock";  // MAC prefixes are all Flock Safety OUIs
@@ -1012,6 +1135,25 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                 method = "flock_uuid";
                 cat = "flock";
             }
+        }
+
+        // 4c. Downgrades and overrides, applied last so they can veto every
+        //     check above. Order matters: a benign clearance beats a false-
+        //     positive name, which beats a bare OUI match.
+        if (detected && fyIsKnownBenignMAC(addrStr.c_str())) {
+            cat = "known_benign";        // field-cleared: counted, never a threat
+        } else if (detected && strcmp(method, "mac_prefix") == 0 &&
+                   fyIsKnownFalsePositive(name.c_str())) {
+            // A shared OUI said surveillance; the device's own name says it is a
+            // smart bulb / OBD dongle / smart lock. The name wins. firmware-todo #3.
+            cat = "false_positive";
+            isRaven = false;
+        } else if (!detected && fyIsFlockCandidateName(name.c_str())) {
+            // Nothing specific matched, but the hostname fits the RPi-based
+            // camera pattern. Suggestive only. firmware-todo #4.
+            detected = true;
+            method = "name_pattern";
+            cat = "flock_candidate";
         }
 
         // 5. Refine glasses: Meta's mfr ID covers BOTH Ray-Ban Meta (camera/surveillance
@@ -1088,8 +1230,9 @@ static void writeDetectionsJSON(AsyncResponseStream *resp) {
                 fyDet[i].isRaven ? "true" : "false", fyDet[i].ravenFW);
             // Append GPS if present (first-seen position)
             if (fyDet[i].hasGPS) {
-                resp->printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
-                    fyDet[i].gpsLat, fyDet[i].gpsLon, fyDet[i].gpsAcc);
+                resp->printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
+                    fyDet[i].gpsLat, fyDet[i].gpsLon, fyDet[i].gpsAcc,
+                    fyDet[i].gpsInterp ? ",\"gps_interp\":true" : "");
             }
             // Append best GPS (peak-RSSI = closest approach position)
             if (fyDet[i].hasBestGPS) {
@@ -1128,7 +1271,8 @@ static void fySaveSession() {
                  d.firstSeen, d.lastSeen, d.count,
                  d.isRaven ? "true" : "false", d.ravenFW);
         if (d.hasGPS) {
-            f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}", d.gpsLat, d.gpsLon, d.gpsAcc);
+            f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
+                d.gpsLat, d.gpsLon, d.gpsAcc, d.gpsInterp ? ",\"gps_interp\":true" : "");
         }
         if (d.hasBestGPS) {
             f.printf(",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
@@ -1760,7 +1904,7 @@ static void fySetupServer() {
     fyServer.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *r) {
         AsyncResponseStream *resp = r->beginResponseStream("text/csv");
         resp->addHeader("Content-Disposition", "attachment; filename=\"dantir_detections.csv\"");
-        resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy,best_rssi,best_latitude,best_longitude,best_gps_accuracy");
+        resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy,best_rssi,best_latitude,best_longitude,best_gps_accuracy,gps_interp");
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             for (int i = 0; i < fyDetCount; i++) {
                 FYDetection& d = fyDet[i];
@@ -1774,10 +1918,11 @@ static void fySetupServer() {
                     resp->print(",,,");
                 }
                 if (d.hasBestGPS) {
-                    resp->printf(",%d,%.8f,%.8f,%.1f\n", d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
+                    resp->printf(",%d,%.8f,%.8f,%.1f", d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
                 } else {
-                    resp->print(",,,\n");  // trailing newline included
+                    resp->print(",,,");
                 }
+                resp->printf(",%s\n", (d.hasGPS && d.gpsInterp) ? "true" : "false");
             }
             xSemaphoreGive(fyMutex);
         }
