@@ -161,11 +161,19 @@ static const char* known_false_positives[] = {
 
 // Locally field-cleared devices: physically searched for and not found to be
 // surveillance. Counted, never categorized as a threat.
-// LEAVE THIS EMPTY IN THE PUBLIC REPO. A MAC here is a specific device at a
-// specific place, so filling it in upstream would publish the maintainer's
-// neighbourhood. Populate it in your own working copy and do not commit it.
-// firmware-todo #4, added 2026-09-20.
+//
+// The list lives in src/known_benign_local.h, which .gitignore refuses, so a
+// populated list can never ride into a commit with an unrelated change. A MAC
+// here is a specific device at a specific place; a list of them is your
+// neighbourhood. Copy known_benign_local.h.example to known_benign_local.h
+// and fill it in. Without the file the table is empty, which is what the
+// public build ships. firmware-todo #4, added 2026-09-20; moved out of this
+// file the same day (audit finding F8).
+#if __has_include("known_benign_local.h")
+#include "known_benign_local.h"
+#else
 static const char* known_benign_macs[] = { };
+#endif
 
 // ============================================================================
 // DETECTION CATEGORIES

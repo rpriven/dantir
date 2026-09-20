@@ -1,0 +1,16 @@
+// known_benign_local.h — YOUR field-cleared devices. LOCAL ONLY.
+//
+// Copy this file to src/known_benign_local.h and add the MACs of devices you
+// physically went and checked and found not to be surveillance (a neighbour's
+// smart lock, a lamp, a doorbell). The firmware counts them but never
+// categorizes them as a threat, never buzzes their threat pattern, and never
+// geo-logs them.
+//
+// src/known_benign_local.h is in .gitignore. Keep it there: a list of cleared
+// devices is a list of specific homes near where you drive and live, and one
+// commit would publish it. This .example file ships with synthetic addresses
+// only (02:da: is a locally-administered prefix that no vendor owns).
+static const char* known_benign_macs[] = {
+    // "02:da:00:00:00:01",   // example: neighbour's smart lock, checked 2026-01-01
+    // "02:da:00:00:00:02",   // example: porch lamp, checked 2026-01-01
+};

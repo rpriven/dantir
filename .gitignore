@@ -18,3 +18,6 @@ sessions/
 
 # Baked maps hold your MACs + coordinates — never commit
 tools/map/out/
+
+# Your field-cleared device list — a list of specific homes near you. Never commit.
+src/known_benign_local.h
