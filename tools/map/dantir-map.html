@@ -101,6 +101,12 @@ const COLOR_MAP = {
   false_positive: "#999999", unknown: "#ffa500",
 };
 // Merge, confidence, name categories and the fixed-install test live in dantir-merge.js (shared with build-map.ts).
+// dantir-merge.js sits beside this page (the standalone build inlines it).
+// Without it nothing can work, so say so on the page instead of dying silently.
+if (!window.DantirMerge) {
+  document.body.insertAdjacentHTML("afterbegin", "<div style=\"padding:16px;background:#7f1d1d;color:#fff;font:14px monospace\">dantir-merge.js did not load. Keep it in the same folder as this page, or use dantir-map.standalone.html, which has it built in.</div>");
+  throw new Error("dantir-merge.js not loaded");
+}
 const { merge, exportRecord } = window.DantirMerge;
 
 const state = { files: [], raw: [], merged: [], layers: {}, map: null, legend: null, stats: null, baseCtl: null, dates: null, offDates: new Set(), offCats: new Set(), unreadable: [], showLow: false, lowHidden: 0 };

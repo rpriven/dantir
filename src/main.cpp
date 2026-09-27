@@ -1545,30 +1545,41 @@ static bool fySaveSession() {  // true only when the file was written
     File f = SPIFFS.open(FY_SESSION_FILE, "w");
     if (!f) { xSemaphoreGive(fyMutex); return false; }
 
-    f.print("[");
+    // Every write is checked (third review F3). A full filesystem makes the
+    // writes return 0; the save then reports failure, and neither the saved
+    // generation nor the clear marker moves, so the next pass retries and a
+    // torn file is never treated as the new truth.
+    bool ok = true;
+    auto chk = [&ok](size_t n) { if (n == 0) ok = false; };
+    chk(f.print("["));
     for (int i = 0; i < fyDetCount; i++) {
-        if (i > 0) f.print(",");
+        if (i > 0) chk(f.print(","));
         FYDetection& d = fyDet[i];
-        f.printf("{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
+        chk(f.printf("{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
                  "\"cat\":\"%s\","
                  "\"first\":%lu,\"last\":%lu,\"count\":%d,"
                  "\"raven\":%s,\"fw\":\"%s\",\"conf\":\"%s\"",
                  d.mac, d.name, d.rssi, d.method,
                  d.category,
                  d.firstSeen, d.lastSeen, d.count,
-                 d.isRaven ? "true" : "false", d.ravenFW, d.confidence);
+                 d.isRaven ? "true" : "false", d.ravenFW, d.confidence));
         if (d.hasGPS) {
-            f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
-                d.gpsLat, d.gpsLon, d.gpsAcc, d.gpsInterp ? ",\"gps_interp\":true" : "");
+            chk(f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
+                d.gpsLat, d.gpsLon, d.gpsAcc, d.gpsInterp ? ",\"gps_interp\":true" : ""));
         }
         if (d.hasBestGPS) {
-            f.printf(",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
-                d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
+            chk(f.printf(",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
+                d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc));
         }
-        f.print("}");
+        chk(f.print("}"));
     }
-    f.print("]");
+    chk(f.print("]"));
     f.close();
+    if (!ok) {
+        printf("[DANTIR] Session save FAILED (filesystem full?): will retry\n");
+        xSemaphoreGive(fyMutex);
+        return false;
+    }
     fyLastSaveCount = fyDetCount;
     fySavedGen = fyDirtyGen;  // read under fyMutex, same as every bump
     // New data exists since the last clear, so the next boot must restore it.
@@ -1629,6 +1640,26 @@ static bool fyPromotePrevSession() {
             printf("[DANTIR] Session file unreadable (%s), %d bytes: keeping prev_session, discarding it\n",
                    perr ? perr.c_str() : "not an array", data.length());
             SPIFFS.remove(FY_SESSION_FILE);
+            return false;
+        }
+    }
+
+    // Opening prev_session "w" truncates the existing backup at once, so the
+    // space check comes FIRST: the new copy must fit in free space plus what
+    // the old backup frees, with a margin for SPIFFS page overhead. Otherwise a
+    // short write destroyed the good backup and then reported failure (third
+    // review F2). Keep both files and report failure instead.
+    {
+        size_t prevSize = 0;
+        if (SPIFFS.exists(FY_PREV_FILE)) {
+            File old = SPIFFS.open(FY_PREV_FILE, "r");
+            if (old) { prevSize = old.size(); old.close(); }
+        }
+        const size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+        const size_t margin = 8192;
+        if (freeBytes + prevSize < data.length() + margin) {
+            printf("[DANTIR] Not enough flash to back up the session (%u needed, %u available): nothing overwritten\n",
+                   (unsigned)(data.length() + margin), (unsigned)(freeBytes + prevSize));
             return false;
         }
     }
@@ -2025,7 +2056,7 @@ function refresh(){fetch('/api/detections').then(r=>{if(!r.ok)throw new Error(r.
 function dtype(d){return d.cat||'unknown';}
 // === RENDER LIST ===
 function render(){const el=document.getElementById('dL');
-if(!D.length){el.innerHTML=_loaded?'<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>':'<div class="empty">Connecting to Dantir...</div>';return;}
+if(!D.length){document.getElementById('rCt').textContent=_loaded?'0 devices':'--';el.innerHTML=_loaded?'<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>':'<div class="empty">Connecting to Dantir...</div>';return;}
 D.sort((a,b)=>b.last-a.last);el.innerHTML=D.map(card).join('');
 document.getElementById('rCt').textContent=D.length+' device'+(D.length!==1?'s':'');}
 function card(d){const t=dtype(d);
@@ -2270,7 +2301,10 @@ static void fySetupServer() {
             r->send(200, "application/json", "{\"status\":\"ignored\",\"reason\":\"hw_gps_active\"}");
             return;
         }
-        if (r->hasParam("lat") && r->hasParam("lon")) {
+        // Present AND non-empty: "?lat=&lon=" used to parse as 0.0/0.0 and
+        // geotag every later detection at Null Island (third review F8).
+        if (r->hasParam("lat") && r->hasParam("lon") &&
+            r->getParam("lat")->value().length() > 0 && r->getParam("lon")->value().length() > 0) {
             // toDouble() is atof(): it accepts "nan", "inf" and 1e300. Any of
             // those used to be stored, then printed as a bare `nan` into every
             // later detection, the session file and the KML, which made the
@@ -2504,6 +2538,20 @@ static void fySetupServer() {
             }
             backedUp = true;
         }
+        // The marker goes down BEFORE the wipe, and its write is checked (third
+        // review F1). Written after the wipe, a power cut in between, or a
+        // failed open, left no marker, so the next boot restored the pre-clear
+        // backup as live detections. If the wipe then cannot take the lock, the
+        // marker is removed again and nothing was cleared.
+        if (fySpiffsReady) {
+            File flag = SPIFFS.open(FY_CLEARED_FLAG, "w");
+            const bool flagOk = flag && flag.print("1") == 1;
+            if (flag) flag.close();
+            if (!flagOk) {
+                r->send(500, "application/json", "{\"error\":\"could not record the clear (nothing cleared)\"}");
+                return;
+            }
+        }
         bool cleared = false;
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             fyDetCount = 0;
@@ -2516,16 +2564,12 @@ static void fySetupServer() {
         }
         if (!cleared) {
             // The list is still live and still backed up in prev_session.json,
-            // so a reboot restores it: no marker, nothing lost (review F3).
+            // so a reboot restores it once the marker is gone: nothing lost.
+            if (fySpiffsReady) SPIFFS.remove(FY_CLEARED_FLAG);
             r->send(503, "application/json", "{\"error\":\"busy, try again (nothing cleared)\"}");
             return;
         }
         fyClearAlertedPending = true;  // loop() owns the alerted-category table
-        // Marker only after the clear really happened (review F3).
-        if (fySpiffsReady) {
-            File flag = SPIFFS.open(FY_CLEARED_FLAG, "w");
-            if (flag) { flag.print("1"); flag.close(); }
-        }
         r->send(200, "application/json",
                 backedUp ? "{\"status\":\"cleared\",\"backup\":\"prev_session\"}"
                          : "{\"status\":\"cleared\",\"backup\":\"none\"}");
