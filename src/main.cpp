@@ -348,21 +348,63 @@ static Adafruit_NeoPixel fyPixel(1, FY_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 static bool fyPixelAlertMode = false;
 static unsigned long fyPixelAlertStart = 0;
 static unsigned long fyLastBleScan = 0;
-static volatile bool fyWifiAlertPending = false;  // Deferred from promiscuous CB
-// The promiscuous callback cannot buzz (it runs on the WiFi task), so the alert
-// is deferred to the main loop. These carry WHAT was seen across that gap. The
-// alert used to hardcode "ring" with the comment "WiFi OUIs are all Ring/Blink",
-// which stopped being true on 2026-09-20 when Flock's own b4:1e:52 went into
-// wifi_mac_prefixes: a Flock camera on WiFi would have buzzed as a doorbell.
-static volatile const char* fyWifiAlertCat  = "ring";
-static volatile const char* fyWifiAlertConf = "low";
+// Every category the firmware can store, as the ONE set of string literals the
+// alert path hands around. fyDet[].category is a char buffer that /api/clear
+// can zero underneath a reader, so anything that crosses a task boundary (the
+// deferred alert) carries a pointer into this table instead. Anything not in
+// the table maps to "unknown".
+static const char* const FY_CATEGORIES[] = {
+    "flock", "axon", "glasses", "vr_headset", "tracker", "lawenf", "ring",
+    "camera", "raven", "wifi", "flock_candidate", "false_positive",
+    "known_benign", "unknown",
+};
+#define FY_NUM_CATEGORIES (int)(sizeof(FY_CATEGORIES) / sizeof(FY_CATEGORIES[0]))
+static_assert(sizeof(FY_CATEGORIES) / sizeof(FY_CATEGORIES[0]) <= 32,
+              "the pending-alert mask is 32 bits wide");
+
+static int fyCategoryIndex(const char* cat) {
+    if (cat) {
+        for (int i = 0; i < FY_NUM_CATEGORIES; i++) {
+            if (strcmp(FY_CATEGORIES[i], cat) == 0) return i;
+        }
+    }
+    return FY_NUM_CATEGORIES - 1;  // "unknown"
+}
+
+static const char* fyCanonicalCategory(const char* cat) {
+    return FY_CATEGORIES[fyCategoryIndex(cat)];
+}
+
+// Alerts are deferred to loop() from BOTH radios (2026-09-27). The WiFi path
+// always had to be (its callback runs on the WiFi task and cannot delay()), but
+// the BLE path used to play the Morse pattern inside NimBLE's onResult, which
+// stalls the BLE host for up to ~1.2 s at the exact moment a new device of
+// interest appears. A bit per category, plus a bit recording whether any
+// sighting of it was high-confidence, set under a spinlock and drained by loop().
+static portMUX_TYPE fyAlertMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t fyAlertPendingMask = 0;
+static volatile uint32_t fyAlertHighMask = 0;
+static volatile bool fyClearAlertedPending = false;  // set by /api/clear, done in loop()
+
+static void fyQueueAlert(const char* cat, const char* confidence) {
+    const uint32_t bit = 1u << fyCategoryIndex(cat);
+    const bool high = confidence && strcmp(confidence, "high") == 0;
+    portENTER_CRITICAL(&fyAlertMux);
+    fyAlertPendingMask |= bit;
+    if (high) fyAlertHighMask |= bit;
+    portEXIT_CRITICAL(&fyAlertMux);
+}
+
 static int fyWifiDetCount = 0;
-static bool fyDeviceInRange = false;
-static unsigned long fyLastDetTime = 0;
+static volatile bool fyDeviceInRange = false;
+static volatile unsigned long fyLastDetTime = 0;
 static unsigned long fyLastHB = 0;
 
-// Per-category alert tracking — each category beeps once, then heartbeat takes over
-#define FY_MAX_ALERTED_CATS 8
+// Per-category alert tracking — each category beeps once, then heartbeat takes over.
+// Touched only from loop() since 2026-09-27; it used to be written from the BLE
+// host task, loop() and the web server's /api/clear with no lock. Sized for every
+// category (it was 8 while the firmware stored 13).
+#define FY_MAX_ALERTED_CATS 16
 static char fyAlertedCats[FY_MAX_ALERTED_CATS][FY_CATEGORY_LEN] = {};
 static_assert(sizeof(FY_LONGEST_CATEGORY) <= FY_CATEGORY_LEN,
               "FY_CATEGORY_LEN is too small for the longest category string");
@@ -420,9 +462,18 @@ static bool fyGPSIsHardware = false;     // Current GPS source is hardware
 // Session persistence (SPIFFS)
 #define FY_SESSION_FILE  "/session.json"
 #define FY_PREV_FILE     "/prev_session.json"
+#define FY_CLEARED_FLAG  "/cleared.flag"   // written by /api/clear, consumed by the next boot's restore
 #define FY_SAVE_INTERVAL 15000  // Auto-save every 15 seconds (prevent data loss on quick power-cycle)
 static unsigned long fyLastSave = 0;
 static int fyLastSaveCount = 0;  // Track changes to avoid unnecessary writes
+// Dirty generation (2026-09-27). Autosave used to fire only when fyDetCount
+// changed, i.e. only when a NEW MAC appeared, so every in-place update (a
+// better peak-RSSI position, a clearance to false_positive, a confidence
+// upgrade, the count) sat unsaved until some unrelated device showed up.
+// Bumped under fyMutex on every add and update; the save records the value it
+// wrote, and loop() saves whenever the two differ.
+static uint32_t fyDirtyGen = 0;
+static uint32_t fySavedGen = 0;
 static bool fySpiffsReady = false;
 
 // Battery monitoring
@@ -532,6 +583,25 @@ static void fyMorseDah() {
     delay(MORSE_DAH_MS + MORSE_GAP_MS);
 }
 
+// Categories whose Morse letter plays even at low confidence (2026-09-27).
+// The low-confidence shortcut below exists so a shared vendor prefix never
+// sounds like a confirmed camera. But these four can ONLY be produced at low
+// confidence, or their letter already says what the shortcut would say, so
+// the shortcut silenced them permanently and three documented letters never
+// played at all:
+//   flock_candidate  only from name_pattern (low). Q is itself the "go look" letter.
+//   axon             only from the 00:25:df prefix, which the IEEE registry assigns
+//                    to Taser International, Axon's former name: the vendor's own
+//                    block, not a module maker's, so a hit is worth its letter.
+//   false_positive   only from prefix-only methods (low). I means "cleared".
+//   known_benign     your own cleared list. I means "cleared".
+static bool fyLetterIgnoresConfidence(const char* category) {
+    return category && (strcmp(category, "flock_candidate") == 0 ||
+                        strcmp(category, "axon") == 0 ||
+                        strcmp(category, "false_positive") == 0 ||
+                        strcmp(category, "known_benign") == 0);
+}
+
 // Play Morse pattern for a detection category
 static void fyMorseCategory(const char* category, const char* confidence) {
     if (!fyBuzzerOn || !category) return;
@@ -540,7 +610,7 @@ static void fyMorseCategory(const char* category, const char* confidence) {
     // A vendor-OUI hit gets one dit, whatever the category guess is. Before
     // this, a Liteon module got the full four-symbol Flock alert, which trains
     // you to ignore the buzzer — and an alert you ignore is not an alert.
-    if (confidence && strcmp(confidence, "low") == 0) {
+    if (confidence && strcmp(confidence, "low") == 0 && !fyLetterIgnoresConfidence(category)) {
         fyMorseDit();
         return;
     }
@@ -722,9 +792,14 @@ static const char* checkWiFiMACPrefix(const uint8_t* mac) {
 // ============================================================================
 // Forward declarations for functions called by WiFi promiscuous callback
 static bool fyGPSIsFresh();
+// outCat / outRaven (2026-09-27) report what the detection STORES after
+// downgrades and sticky categories, read under the mutex, including when the
+// call returns -1 (mutex timeout or array full). outCat always points into
+// FY_CATEGORIES, so it stays valid after the call and across tasks.
 static int fyAddDetection(const char* mac, const char* name, int rssi,
                           const char* method, const char* category = "unknown",
-                          bool isRaven = false, const char* ravenFW = "");
+                          bool isRaven = false, const char* ravenFW = "",
+                          const char** outCat = nullptr, bool* outRaven = nullptr);
 static const char* fyConfidence(const char* method);
 static const char* fyApplyDowngrades(const char*, const char*, const char*, const char*, bool*);
 
@@ -792,13 +867,13 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
                        : (subtype == WIFI_MGMT_PROBE_REQ) ? "wifi_probe" : "wifi_beacon";
     int rssi = pkt->rx_ctrl.rssi;
 
-    int idx = fyAddDetection(mac_str, ssid, rssi, method, wcat);
-    // Everything below reports and alerts on the POST-downgrade category, the
-    // same one fyAddDetection stored. fyApplyDowngrades returns string
-    // literals, so wcat stays a stable pointer for the deferred alert in the
-    // main loop (fyWifiAlertCat); reading fyDet[idx].category there would
-    // point into a slot that a session clear can zero underneath it.
-    wcat = fyApplyDowngrades(mac_str, ssid, method, wcat, nullptr);
+    // Everything below reports and alerts on the category fyAddDetection
+    // STORED, not one recomputed from this frame. Recomputing ignored sticky
+    // categories: a device cleared to false_positive by a named beacon buzzed
+    // its OUI's threat pattern again on the next nameless probe (2026-09-27).
+    const char* storedCat = nullptr;
+    int idx = fyAddDetection(mac_str, ssid, rssi, method, wcat, false, "", &storedCat);
+    wcat = storedCat ? storedCat : fyCanonicalCategory(wcat);
     if (idx >= 0) {
         if (fyDet[idx].count == 1) {
             // First sighting — new WiFi surveillance device
@@ -820,9 +895,7 @@ static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
         // Defer buzzer/LED alert to main loop (can't call delay() here)
         fyDeviceInRange = true;
         fyLastDetTime = millis();
-        fyWifiAlertCat  = wcat;
-        fyWifiAlertConf = fyConfidence(method);
-        fyWifiAlertPending = true;
+        fyQueueAlert(wcat, fyConfidence(method));
     }
 }
 
@@ -1098,8 +1171,15 @@ static const char* fyApplyDowngrades(const char* mac, const char* name,
 
 static int fyAddDetection(const char* mac, const char* name, int rssi,
                           const char* method, const char* category,
-                          bool isRaven, const char* ravenFW) {
+                          bool isRaven, const char* ravenFW,
+                          const char** outCat, bool* outRaven) {
     category = fyApplyDowngrades(mac, name, method, category, &isRaven);
+    // Until the mutex says otherwise, what we report is this sighting after
+    // downgrades. The -1 exits keep it, so a caller never falls back to the
+    // pre-downgrade category (a cleared device buzzed as flock whenever the
+    // mutex was busy or the array was full; 2026-09-27).
+    if (outCat) *outCat = fyCanonicalCategory(category);
+    if (outRaven) *outRaven = isRaven;
     if (!fyMutex || xSemaphoreTake(fyMutex, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
 
     // Update existing by MAC
@@ -1145,8 +1225,13 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             }
             // Update GPS on every re-sighting (captures movement)
             fyAttachGPS(fyDet[i]);
-            // Track peak RSSI — strongest signal = closest approach to device
-            if (rssi > fyDet[i].bestRSSI && fyGPSIsFresh() &&
+            // Track peak RSSI — strongest signal = closest approach to device.
+            // A record with no best position yet takes the first fresh fix
+            // whatever its RSSI (2026-09-27): bestRSSI is seeded from a
+            // sighting that may have had no GPS, and a restored row without
+            // best_rssi comes back at 0, which no real (negative) RSSI beats,
+            // so such a device could never get a best_gps at all.
+            if ((!fyDet[i].hasBestGPS || rssi > fyDet[i].bestRSSI) && fyGPSIsFresh() &&
                 fyCategoryMayGeoLog(fyDet[i].category)) {
                 fyDet[i].bestRSSI = rssi;
                 fyDet[i].bestGPSLat = fyGPSLat;
@@ -1154,6 +1239,9 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
                 fyDet[i].bestGPSAcc = fyGPSAcc;
                 fyDet[i].hasBestGPS = true;
             }
+            fyDirtyGen++;
+            if (outCat) *outCat = fyCanonicalCategory(fyDet[i].category);
+            if (outRaven) *outRaven = fyDet[i].isRaven;
             xSemaphoreGive(fyMutex);
             return i;
         }
@@ -1188,6 +1276,9 @@ static int fyAddDetection(const char* mac, const char* name, int rssi,
             d.hasBestGPS = true;
         }
         int idx = fyDetCount++;
+        fyDirtyGen++;
+        if (outCat) *outCat = fyCanonicalCategory(d.category);
+        if (outRaven) *outRaven = d.isRaven;
         xSemaphoreGive(fyMutex);
         return idx;
     }
@@ -1318,19 +1409,25 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
         }
 
         if (detected) {
+            const char* storedCat = nullptr;
+            bool ravenNow = isRaven;
             int idx = fyAddDetection(addrStr.c_str(), name.c_str(), rssi,
                                      method, cat ? cat : "unknown",
-                                     isRaven, ravenFW);
+                                     isRaven, ravenFW, &storedCat, &ravenNow);
 
-            // Log, serial JSON and the alert all use the category AFTER
-            // fyApplyDowngrades ran inside fyAddDetection. Until 2026-09-20 they
-            // used the caller's pre-downgrade `cat`, so a known_benign or
-            // false_positive device still buzzed its original threat pattern and
-            // printed category: flock on serial, and the "identified, not a
-            // threat" Morse case was unreachable.
-            const char* catStr = (idx >= 0) ? fyDet[idx].category : (cat ? cat : "unknown");
+            // Log, serial JSON and the alert all use the category fyAddDetection
+            // STORED (post-downgrade, sticky), on every path. 2026-09-20 fixed
+            // this for idx >= 0 only; on -1 (mutex busy, array full) the caller
+            // fell back to its pre-downgrade `cat` and a cleared device buzzed
+            // as flock. storedCat points into FY_CATEGORIES, never into fyDet.
+            const char* catStr = storedCat ? storedCat : "unknown";
+            // The radio's name is attacker-controlled and this stream is
+            // line-delimited JSON: print the sanitized copy, never the raw one,
+            // or a crafted name forges a whole extra record (2026-09-27).
+            char safeName[48];
+            fySanitizeName(safeName, sizeof(safeName), name.c_str());
             printf("[DANTIR] DETECTED [%s]: %s %s RSSI:%d [%s] count:%d\n",
-                   catStr, addrStr.c_str(), name.c_str(), rssi, method,
+                   catStr, addrStr.c_str(), safeName, rssi, method,
                    idx >= 0 ? fyDet[idx].count : 0);
 
             // JSON serial output (Flask-compatible format for live ingestion)
@@ -1341,24 +1438,23 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
                     ",\"gps\":{\"latitude\":%.8f,\"longitude\":%.8f,\"accuracy\":%.1f}",
                     fyGPSLat, fyGPSLon, fyGPSAcc);
             }
-            const bool ravenNow = (idx >= 0) ? fyDet[idx].isRaven : isRaven;
             if (ravenNow) {
                 printf("{\"detection_method\":\"%s\",\"category\":\"%s\",\"protocol\":\"bluetooth_le\","
                        "\"mac_address\":\"%s\",\"device_name\":\"%s\","
                        "\"rssi\":%d,\"is_raven\":true,\"raven_fw\":\"%s\"%s}\n",
-                       method, catStr, addrStr.c_str(), name.c_str(), rssi, ravenFW, gpsBuf);
+                       method, catStr, addrStr.c_str(), safeName, rssi, ravenFW, gpsBuf);
             } else {
                 printf("{\"detection_method\":\"%s\",\"category\":\"%s\",\"protocol\":\"bluetooth_le\","
                        "\"mac_address\":\"%s\",\"device_name\":\"%s\","
                        "\"rssi\":%d%s}\n",
-                       method, catStr, addrStr.c_str(), name.c_str(), rssi, gpsBuf);
+                       method, catStr, addrStr.c_str(), safeName, rssi, gpsBuf);
             }
 
-            if (!fyCategoryAlerted(catStr)) {
-                fyMarkCategoryAlerted(catStr);
-                fyDetectBeep(catStr, fyConfidence(method));
-                fyLastHB = millis();  // Start heartbeat countdown AFTER the alert beep
-            }
+            // Queued, not played: this runs inside NimBLE's onResult, and the
+            // Morse pattern's delay()s used to stall the BLE host for up to
+            // ~1.2 s right when a new device of interest appeared. loop() plays
+            // it, exactly as it always did for WiFi.
+            fyQueueAlert(catStr, fyConfidence(method));
             fyDeviceInRange = true;
             fyLastDetTime = millis();
         }
@@ -1368,6 +1464,20 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
 // ============================================================================
 // JSON HELPER
 // ============================================================================
+
+// State-changing routes (/api/gps, /api/clear) are POST since 2026-09-27; as
+// GETs, any link or <img> on any page the phone opened could wipe the session
+// or poison every later geotag. A cross-site form POST is still possible, so a
+// request that carries an Origin must come from this device's own dashboard.
+// (The dashboard's own fetch() sends Origin: http://<this host>.)
+// This is a stopgap until firmware-todo #11 gives the AP a per-device password.
+static bool fyForeignOrigin(AsyncWebServerRequest *r) {
+    if (!r->hasHeader("Origin")) return false;
+    const String origin = r->header("Origin");
+    const String host = r->host();
+    if (host.length() == 0) return true;
+    return !(origin == ("http://" + host) || origin == ("https://" + host));
+}
 
 static void writeDetectionsJSON(AsyncResponseStream *resp) {
     resp->print("[");
@@ -1439,6 +1549,9 @@ static void fySaveSession() {
     f.print("]");
     f.close();
     fyLastSaveCount = fyDetCount;
+    fySavedGen = fyDirtyGen;  // read under fyMutex, same as every bump
+    // New data exists since the last clear, so the next boot must restore it.
+    if (fyDetCount > 0 && SPIFFS.exists(FY_CLEARED_FLAG)) SPIFFS.remove(FY_CLEARED_FLAG);
     printf("[DANTIR] Session saved: %d detections\n", fyDetCount);
     xSemaphoreGive(fyMutex);
 }
@@ -1466,6 +1579,22 @@ static void fyPromotePrevSession() {
         return;
     }
 
+    // Never overwrite the backup with something that does not parse
+    // (2026-09-27). A save truncates the file and rewrites ~80 KB; a brownout
+    // or reset mid-write leaves "[{...". This used to be copied over
+    // prev_session.json unchecked, so one torn write destroyed BOTH copies and
+    // restore then failed on the truncated file. Keep the good backup instead.
+    {
+        JsonDocument probe;
+        DeserializationError perr = deserializeJson(probe, data);
+        if (perr || !probe.is<JsonArray>()) {
+            printf("[DANTIR] Session file unreadable (%s), %d bytes: keeping prev_session, discarding it\n",
+                   perr ? perr.c_str() : "not an array", data.length());
+            SPIFFS.remove(FY_SESSION_FILE);
+            return;
+        }
+    }
+
     // Write to prev_session (overwrite any existing)
     File dst = SPIFFS.open(FY_PREV_FILE, "w");
     if (!dst) {
@@ -1485,6 +1614,14 @@ static void fyPromotePrevSession() {
 static void fyRestoreSession() {
     if (!fySpiffsReady || !SPIFFS.exists(FY_PREV_FILE)) {
         printf("[DANTIR] No prev_session to restore\n");
+        return;
+    }
+    // A clear leaves this marker. prev_session.json then holds the pre-clear
+    // backup (still served by /api/history), but it must not be loaded back
+    // into the live list, or a cleared session reappears on the next boot.
+    if (SPIFFS.exists(FY_CLEARED_FLAG)) {
+        SPIFFS.remove(FY_CLEARED_FLAG);
+        printf("[DANTIR] Detections were cleared before this boot: prev_session kept as history, not restored\n");
         return;
     }
 
@@ -1565,6 +1702,7 @@ static void fyRestoreSession() {
 
     // Mark as already saved so we don't immediately re-write the same data
     fyLastSaveCount = fyDetCount;
+    fySavedGen = fyDirtyGen;
     printf("[DANTIR] Restored %d detections from prev_session\n", restored);
 }
 
@@ -1718,6 +1856,8 @@ font-family:inherit;font-size:11px;font-weight:bold;letter-spacing:1px;cursor:po
 .btn:active{background:var(--btn-act)}
 .btn.dng{background:#ef4444}
 .empty{text-align:center;color:var(--t2);padding:28px;font-size:14px}
+.lnk{display:none;margin:0 0 8px;padding:6px 10px;border-radius:6px;font-size:12px;background:rgba(250,204,21,.12);color:#facc15;border:1px solid rgba(250,204,21,.35)}
+.lnk.bad{background:rgba(239,68,68,.12);color:#ef4444;border-color:rgba(239,68,68,.35)}
 .sep{border:none;border-top:1px solid var(--b3);margin:12px 0}
 h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 </style></head><body>
@@ -1745,12 +1885,13 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 <div class="cn">
 <div class="pn a" id="p0">
 <div class="rp">
-<div class="rp-h" onclick="togRadar()"><div><span class="arr" id="rArr">&#9654;</span> PROXIMITY RADAR</div><span class="rp-ct" id="rCt">0 devices</span></div>
+<div class="rp-h" onclick="togRadar()"><div><span class="arr" id="rArr">&#9654;</span> PROXIMITY RADAR</div><span class="rp-ct" id="rCt">--</span></div>
 <div class="rp-b" id="rB"><canvas id="rC" width="280" height="280"></canvas>
 <div class="rp-lg"><span style="color:var(--bl-flock)">&#9679;</span>Flock <span style="color:var(--bl-ring)">&#9679;</span>Ring <span style="color:var(--bl-raven)">&#9679;</span>Raven <span style="color:#22c55e">&#9679;</span>WiFi <span style="color:#e879f9">&#9679;</span>Glasses <span style="color:#f43f5e">&#9679;</span>LawEnf <span style="color:#fb923c">&#9679;</span>Tracker <span style="color:#a855f7">&#9679;</span>Axon <span style="color:#fbbf24">&#9679;</span>Candidate <span style="color:#4ade80">&#9679;</span>Cleared <span style="color:var(--bl-other)">&#9679;</span>Other</div></div>
 </div>
 <div class="ch" id="chP" style="display:none"><canvas id="chC" height="60"></canvas></div>
-<div id="dL"><div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div></div>
+<div class="lnk" id="lnk"></div><div class="lnk bad" id="fullw"></div>
+<div id="dL"><div class="empty">Connecting to Dantir...</div></div>
 </div>
 <div class="pn" id="p1"><div id="hL"><div class="empty">Loading prior session...</div></div></div>
 <div class="pn" id="p2"><div id="pC">Loading patterns...</div></div>
@@ -1765,7 +1906,7 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 <button class="btn" onclick="dlTS('/api/history/json','dantir_prev','json')" style="background:#6366f1">DOWNLOAD PREV JSON</button>
 <button class="btn" onclick="dlTS('/api/history/kml','dantir_prev','kml')" style="background:#22c55e">DOWNLOAD PREV KML</button>
 <hr class="sep">
-<button class="btn dng" onclick="if(confirm('Clear all detections?'))fetch('/api/clear').then(()=>refresh())">CLEAR ALL DETECTIONS</button>
+<button class="btn dng" onclick="if(confirm('Clear all detections? They are backed up to PREV SESSION first.'))fetch('/api/clear',{method:'POST'}).then(r=>r.json()).then(j=>{alert(j.error?('Clear failed: '+j.error):(j.backup==='prev_session'?'Cleared. Backup saved to PREV SESSION.':'Cleared.'));refresh();loadHistory();}).catch(()=>alert('Clear failed: no connection to Dantir.'))">CLEAR ALL DETECTIONS</button>
 </div>
 </div>
 <script>
@@ -1823,12 +1964,21 @@ if(i===1&&!window._hL)loadHistory();if(i===2&&!window._pL)loadPat();}
 // === TIMESTAMPED DOWNLOAD ===
 function dlTS(url,prefix,ext){const d=new Date();const ts=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+'_'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+String(d.getSeconds()).padStart(2,'0');fetch(url).then(r=>r.blob()).then(b=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=prefix+'_'+ts+'.'+ext;a.click();URL.revokeObjectURL(a.href);});}
 // === REFRESH ===
-function refresh(){fetch('/api/detections').then(r=>r.json()).then(d=>{D=d;render();stats();drawChart();}).catch(()=>{});}
+// Link state (2026-09-27): a failed fetch used to be swallowed, so on a weak AP
+// the page showed "Scanning... 0 devices" while the board held detections. Now
+// the last good data stays on screen and a banner says how old it is.
+let _lastOk=0,_loaded=false;
+function linkUI(){const e=document.getElementById('lnk');if(!e)return;
+if(!_loaded){e.className='lnk bad';e.style.display='block';e.textContent='Cannot reach Dantir yet: retrying. Nothing below is a real zero.';return;}
+const age=Math.round((Date.now()-_lastOk)/1000);
+if(age<8){e.style.display='none';return;}
+e.className=age>30?'lnk bad':'lnk';e.style.display='block';e.textContent='Connection lost '+age+'s ago: showing the last data received.';}
+function refresh(){fetch('/api/detections').then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}).then(d=>{D=d;_lastOk=Date.now();_loaded=true;linkUI();render();stats();drawChart();}).catch(()=>{linkUI();});}
 // === DETECT TYPE ===
 function dtype(d){return d.cat||'unknown';}
 // === RENDER LIST ===
 function render(){const el=document.getElementById('dL');
-if(!D.length){el.innerHTML='<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>';return;}
+if(!D.length){el.innerHTML=_loaded?'<div class="empty">Scanning for surveillance devices...<br>BLE + WiFi promiscuous active</div>':'<div class="empty">Connecting to Dantir...</div>';return;}
 D.sort((a,b)=>b.last-a.last);el.innerHTML=D.map(card).join('');
 document.getElementById('rCt').textContent=D.length+' device'+(D.length!==1?'s':'');}
 function card(d){const t=dtype(d);
@@ -1860,7 +2010,8 @@ let bt=document.getElementById('sBat'),bl=document.getElementById('sBatL');
 if(s.batt_pct>=0){bt.textContent=s.batt_pct+'%';bl.textContent=s.batt_v.toFixed(1)+'V';
 bt.style.color=s.batt_pct>20?'#22c55e':s.batt_pct>10?'#facc15':'#ef4444';}
 else{bt.textContent=s.uptime;bl.textContent='UPTIME';}
-}).catch(()=>{});}
+const fw=document.getElementById('fullw');if(fw){if(s.full){fw.style.display='block';fw.textContent='Storage full ('+s.total+'): new devices are NOT being recorded. Export, then clear.';}else fw.style.display='none';}
+}).catch(()=>{linkUI();});}
 // === RADAR ===
 function togRadar(){_rO=!_rO;
 document.getElementById('rB').classList.toggle('open',_rO);
@@ -1978,7 +2129,7 @@ document.addEventListener('visibilitychange',function(){if(document.visibilitySt
 // callbacks never fire and the only symptom is a code-3 TIMEOUT. Re-arm on restore.
 window.addEventListener('pageshow',function(ev){if(ev.persisted&&_gTried){startGPS();}});
 function sendGPS(p){_gOk=true;_gErr=0;_gErrTxt='';let g=document.getElementById('sG');g.textContent='OK';g.style.color='#22c55e';
-fetch('/api/gps?lat='+p.coords.latitude+'&lon='+p.coords.longitude+'&acc='+(p.coords.accuracy||0)).catch(()=>{});}
+fetch('/api/gps?lat='+p.coords.latitude+'&lon='+p.coords.longitude+'&acc='+(p.coords.accuracy||0),{method:'POST'}).catch(()=>{});}
 function gpsErr(e){_gOk=false;_gErr=e.code;let g=document.getElementById('sG');
 var msg='ERR';if(e.code===1){msg='DENIED';g.style.color='#ef4444';alert('GPS permission denied. On iPhone, GPS requires HTTPS which this device cannot provide. On Android Chrome, tap the lock/info icon in the address bar and allow Location.');}
 else if(e.code===2){msg='N/A';g.style.color='#ef4444';}
@@ -2001,7 +2152,7 @@ document.getElementById('tagline').innerHTML=TAGS[Math.floor(Math.random()*TAGS.
 // independently and the day they drift, purple stops applying while the
 // selector still reads PURPLE, with nothing to point at. Fixed 2026-09-20.
 (function(){const s=localStorage.getItem('dantir_theme')||'purple';document.getElementById('thm').value=s;setTheme(s);})();
-refresh();setInterval(refresh,2500);
+refresh();setInterval(refresh,2500);setInterval(linkUI,1000);
 function rLoop(){drawRadar();requestAnimationFrame(rLoop);}rLoop();
 </script></body></html>
 )rawliteral";
@@ -2040,14 +2191,14 @@ static void fySetupServer() {
         int upH = upSec / 3600, upM = (upSec % 3600) / 60;
         char buf[512];
         snprintf(buf, sizeof(buf),
-            "{\"total\":%d,\"raven\":%d,\"ble\":\"active\",\"wifi\":\"active\","
+            "{\"total\":%d,\"full\":%s,\"raven\":%d,\"ble\":\"active\",\"wifi\":\"active\","
             "\"wifi_det\":%d,"
             "\"gps_valid\":%s,\"gps_age\":%lu,\"gps_tagged\":%d,"
             "\"gps_src\":\"%s\",\"gps_sats\":%d,\"gps_hw_detected\":%s,"
             "\"device_lat\":%.8f,\"device_lon\":%.8f,"
             "\"batt_pct\":%d,\"batt_v\":%.2f,"
             "\"uptime\":\"%dh%02dm\"}",
-            fyDetCount, raven, fyWifiDetCount,
+            fyDetCount, fyDetCount >= MAX_DETECTIONS ? "true" : "false", raven, fyWifiDetCount,
             fyGPSIsFresh() ? "true" : "false",
             fyGPSValid ? (millis() - fyGPSLastUpdate) : 0UL,
             withGPS,
@@ -2060,15 +2211,31 @@ static void fySetupServer() {
     });
 
     // API: Receive GPS from phone browser (ignored when hardware GPS has fix)
-    fyServer.on("/api/gps", HTTP_GET, [](AsyncWebServerRequest *r) {
+    fyServer.on("/api/gps", HTTP_POST, [](AsyncWebServerRequest *r) {
+        if (fyForeignOrigin(r)) {
+            r->send(403, "application/json", "{\"error\":\"cross-origin\"}");
+            return;
+        }
         if (fyHWGPSFix) {
             r->send(200, "application/json", "{\"status\":\"ignored\",\"reason\":\"hw_gps_active\"}");
             return;
         }
         if (r->hasParam("lat") && r->hasParam("lon")) {
-            fyGPSLat = r->getParam("lat")->value().toDouble();
-            fyGPSLon = r->getParam("lon")->value().toDouble();
-            fyGPSAcc = r->hasParam("acc") ? r->getParam("acc")->value().toFloat() : 0;
+            // toDouble() is atof(): it accepts "nan", "inf" and 1e300. Any of
+            // those used to be stored, then printed as a bare `nan` into every
+            // later detection, the session file and the KML, which made the
+            // dashboard's JSON unparseable and the saved session unrestorable.
+            const double lat = r->getParam("lat")->value().toDouble();
+            const double lon = r->getParam("lon")->value().toDouble();
+            float acc = r->hasParam("acc") ? r->getParam("acc")->value().toFloat() : 0;
+            if (!isfinite(lat) || !isfinite(lon) || fabs(lat) > 90.0 || fabs(lon) > 180.0) {
+                r->send(400, "application/json", "{\"error\":\"lat/lon out of range\"}");
+                return;
+            }
+            if (!isfinite(acc) || acc < 0 || acc > 100000.0f) acc = 0;
+            fyGPSLat = lat;
+            fyGPSLon = lon;
+            fyGPSAcc = acc;
             fyGPSValid = true;
             fyGPSLastUpdate = millis();
             fyGPSIsHardware = false;
@@ -2162,14 +2329,12 @@ static void fySetupServer() {
         r->send(resp);
     });
 
-    // API: Prior session history (JSON)
-    fyServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest *r) {
-        if (fySpiffsReady && SPIFFS.exists(FY_PREV_FILE)) {
-            r->send(SPIFFS, FY_PREV_FILE, "application/json");
-        } else {
-            r->send(200, "application/json", "[]");
-        }
-    });
+    // ROUTE ORDER MATTERS (2026-09-27). ESPAsyncWebServer tries handlers in
+    // registration order, and a plain path matches its own sub-paths too
+    // (WebHandlerImpl.h: url == uri || url.startsWith(uri + "/")). "/api/history"
+    // was registered first, so it answered /api/history/kml and /json with the
+    // raw JSON: DOWNLOAD PREV KML never produced KML (firmware-todo #12). The
+    // base route is now registered AFTER both sub-routes, below.
 
     // API: Download prior session as JSON file
     fyServer.on("/api/history/json", HTTP_GET, [](AsyncWebServerRequest *r) {
@@ -2251,17 +2416,59 @@ static void fySetupServer() {
     });
 
     // API: Clear all detections (saves current session first)
-    fyServer.on("/api/clear", HTTP_GET, [](AsyncWebServerRequest *r) {
-        fySaveSession();  // Persist before clearing
+    // "Clear (backs up first)" now does (2026-09-27). It used to save the
+    // pre-clear list into session.json, which the next autosave overwrote with
+    // the post-clear list, so one new detection and 15 s later the backup was
+    // gone; and a reboot before that re-loaded the cleared list into the live
+    // view. Now: save, promote session.json -> prev_session.json (parse-checked,
+    // served by /api/history and the PREV downloads), and leave a marker so the
+    // next boot does not restore the cleared list as live detections.
+    fyServer.on("/api/clear", HTTP_POST, [](AsyncWebServerRequest *r) {
+        if (fyForeignOrigin(r)) {
+            r->send(403, "application/json", "{\"error\":\"cross-origin\"}");
+            return;
+        }
+        // Only back up when there is something to back up: clearing an empty
+        // list would otherwise save "[]" and promote it over the real backup.
+        bool backedUp = false;
+        if (fySpiffsReady && fyDetCount > 0) {
+            fySaveSession();
+            fyPromotePrevSession();
+            backedUp = SPIFFS.exists(FY_PREV_FILE);
+        }
+        if (fySpiffsReady) {
+            File flag = SPIFFS.open(FY_CLEARED_FLAG, "w");
+            if (flag) { flag.print("1"); flag.close(); }
+        }
+        bool cleared = false;
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             fyDetCount = 0;
             memset(fyDet, 0, sizeof(fyDet));
-            fyClearAlertedCategories();
             fyDeviceInRange = false;
+            fyLastSaveCount = 0;
+            fySavedGen = fyDirtyGen;
             xSemaphoreGive(fyMutex);
+            cleared = true;
         }
-        r->send(200, "application/json", "{\"status\":\"cleared\"}");
-        printf("[DANTIR] All detections cleared (session saved)\n");
+        fyClearAlertedPending = true;  // loop() owns the alerted-category table
+        if (!cleared) {
+            r->send(503, "application/json", "{\"error\":\"busy, try again\"}");
+            return;
+        }
+        r->send(200, "application/json",
+                backedUp ? "{\"status\":\"cleared\",\"backup\":\"prev_session\"}"
+                         : "{\"status\":\"cleared\",\"backup\":\"none\"}");
+        printf("[DANTIR] All detections cleared (backup: %s)\n", backedUp ? "prev_session" : "none");
+    });
+
+    // API: Prior session history (JSON). Registered AFTER /api/history/json and
+    // /api/history/kml on purpose; see ROUTE ORDER above.
+    fyServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest *r) {
+        if (fySpiffsReady && SPIFFS.exists(FY_PREV_FILE)) {
+            r->send(SPIFFS, FY_PREV_FILE, "application/json");
+        } else {
+            r->send(200, "application/json", "[]");
+        }
     });
 
     fyServer.begin();
@@ -2386,14 +2593,32 @@ void loop() {
         fyBLEScan->clearResults();
     }
 
-    // WiFi detection alert (deferred from promiscuous callback — can't buzz there)
-    if (fyWifiAlertPending) {
-        fyWifiAlertPending = false;
-        const char* wc = (const char*)fyWifiAlertCat;
-        if (!fyCategoryAlerted(wc)) {
-            fyMarkCategoryAlerted(wc);
-            fyDetectBeep(wc, (const char*)fyWifiAlertConf);
-            fyLastHB = millis();
+    // /api/clear asks; loop() owns the alerted-category table, so it clears it.
+    if (fyClearAlertedPending) {
+        fyClearAlertedPending = false;
+        fyClearAlertedCategories();
+    }
+
+    // Detection alerts deferred from BOTH radio callbacks. One pending bit per
+    // category, so two categories seen while an alert was playing both beep
+    // (the old single WiFi slot kept only the last one). A category plays its
+    // high-confidence pattern if any queued sighting of it was high.
+    uint32_t pending, highs;
+    portENTER_CRITICAL(&fyAlertMux);
+    pending = fyAlertPendingMask;
+    highs = fyAlertHighMask;
+    fyAlertPendingMask = 0;
+    fyAlertHighMask = 0;
+    portEXIT_CRITICAL(&fyAlertMux);
+    for (int c = 0; pending && c < FY_NUM_CATEGORIES; c++) {
+        const uint32_t bit = 1u << c;
+        if (!(pending & bit)) continue;
+        pending &= ~bit;
+        const char* cat = FY_CATEGORIES[c];
+        if (!fyCategoryAlerted(cat)) {
+            fyMarkCategoryAlerted(cat);
+            fyDetectBeep(cat, (highs & bit) ? "high" : "low");
+            fyLastHB = millis();  // Start heartbeat countdown AFTER the alert beep
         }
     }
 
@@ -2403,17 +2628,22 @@ void loop() {
             fyHeartbeat();
             fyLastHB = millis();
         }
-        if (millis() - fyLastDetTime >= 30000) {
+        // Read the radio tasks' timestamp BEFORE millis(): read the other way
+        // round, a detection landing in between makes the subtraction wrap and
+        // fires a false "out of range" that re-arms every category's alert.
+        const unsigned long lastDet = fyLastDetTime;
+        if (millis() - lastDet >= 30000) {
             printf("[DANTIR] Device out of range - stopping heartbeat\n");
             fyDeviceInRange = false;
             fyClearAlertedCategories();
         }
     }
 
-    // Auto-save session to SPIFFS every 15s if detections changed
-    // Also triggers an early save 5s after first detection to minimize loss on power-cycle
+    // Auto-save session to SPIFFS every 15s if ANYTHING changed (dirty generation,
+    // not detection count). Also triggers an early save 5s after first detection
+    // to minimize loss on power-cycle.
     if (fySpiffsReady && millis() - fyLastSave >= FY_SAVE_INTERVAL) {
-        if (fyDetCount > 0 && fyDetCount != fyLastSaveCount) {
+        if (fyDetCount > 0 && fyDirtyGen != fySavedGen) {
             fySaveSession();
         }
         fyLastSave = millis();

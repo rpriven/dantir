@@ -217,11 +217,11 @@ The onboard server (port 80) exposes a small JSON API used by the dashboard:
 | `GET /` | Dashboard UI |
 | `GET /api/detections` | Live detection list |
 | `GET /api/stats` | Counts, GPS status, battery/uptime |
-| `GET /api/gps?lat=&lon=&acc=` | Push phone GPS to the device |
+| `POST /api/gps?lat=&lon=&acc=` | Push phone GPS to the device (rejects non-finite or out-of-range values; cross-origin requests refused) |
 | `GET /api/patterns` | Full signature database (MACs, names, MFR IDs, UUIDs) |
 | `GET /api/export/{json,csv,kml}` | Download current session |
 | `GET /api/history` · `/api/history/{json,kml}` | Prior session |
-| `GET /api/clear` | Clear detections (backs up first) |
+| `POST /api/clear` | Clear detections; the list is backed up to the prior session first (cross-origin requests refused) |
 
 ---
 
