@@ -462,7 +462,10 @@ static bool fyGPSIsHardware = false;     // Current GPS source is hardware
 // Session persistence (SPIFFS)
 #define FY_SESSION_FILE  "/session.json"
 #define FY_PREV_FILE     "/prev_session.json"
-#define FY_CLEARED_FLAG  "/cleared.flag"   // written by /api/clear, consumed by the next boot's restore
+#define FY_CLEARED_FLAG  "/cleared.flag"   // written by /api/clear; removed by the first save with post-clear data, or a boot promote
+// True while /api/clear is saving and promoting, so loop()'s autosave cannot
+// open session.json for writing under the clear's unlocked read (review 2 F2).
+static volatile bool fyClearBusy = false;
 #define FY_SAVE_INTERVAL 15000  // Auto-save every 15 seconds (prevent data loss on quick power-cycle)
 static unsigned long fyLastSave = 0;
 static int fyLastSaveCount = 0;  // Track changes to avoid unnecessary writes
@@ -2223,13 +2226,14 @@ static void fySetupServer() {
     // API: Stats (includes GPS status)
     fyServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest *r) {
         int raven = 0, withGPS = 0;
-        if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            for (int i = 0; i < fyDetCount; i++) {
-                if (fyDet[i].isRaven) raven++;
-                if (fyDet[i].hasGPS) withGPS++;
-            }
-            xSemaphoreGive(fyMutex);
+        // 503 on a lock timeout, not raven=0 / gps_tagged=0 beside a real
+        // total (review 2 F6; same false-zero class as /api/detections).
+        if (!fyLockForWeb(r)) return;
+        for (int i = 0; i < fyDetCount; i++) {
+            if (fyDet[i].isRaven) raven++;
+            if (fyDet[i].hasGPS) withGPS++;
         }
+        xSemaphoreGive(fyMutex);
         const char* gpsSrc = "none";
         if (fyGPSIsHardware && fyHWGPSFix) gpsSrc = "hw";
         else if (fyGPSIsFresh()) gpsSrc = "phone";
@@ -2480,6 +2484,8 @@ static void fySetupServer() {
             r->send(403, "application/json", "{\"error\":\"cross-origin\"}");
             return;
         }
+        // Pause autosave for the whole clear; released on every return below.
+        struct ClearBusyGuard { ClearBusyGuard() { fyClearBusy = true; } ~ClearBusyGuard() { fyClearBusy = false; } } clearBusy;
         // Only back up when there is something to back up: clearing an empty
         // list would otherwise save "[]" and promote it over the real backup.
         // Nothing is wiped unless the save AND the promote both succeeded: a
@@ -2583,7 +2589,11 @@ void setup() {
         printf("[DANTIR] SPIFFS ready\n");
         // Promote last session to prev_session (backup), then restore into live array
         // This means: prev_session always has a backup, AND dashboard keeps all detections
-        fyPromotePrevSession();
+        // A session.json that exists at boot is always data saved AFTER any
+        // clear (clear promotes it away before writing the marker), so a
+        // successful promote retires the marker. Otherwise a power loss between
+        // a post-clear save and its marker removal hid that data (review 2 F1).
+        if (fyPromotePrevSession()) SPIFFS.remove(FY_CLEARED_FLAG);
         fyRestoreSession();
     } else {
         printf("[DANTIR] SPIFFS init failed - no persistence\n");
@@ -2707,7 +2717,9 @@ void loop() {
     // Auto-save session to SPIFFS every 15s if ANYTHING changed (dirty generation,
     // not detection count). Also triggers an early save 5s after first detection
     // to minimize loss on power-cycle.
-    if (fySpiffsReady && millis() - fyLastSave >= FY_SAVE_INTERVAL) {
+    if (fyClearBusy) {
+        // a clear is mid-promote; the next pass saves
+    } else if (fySpiffsReady && millis() - fyLastSave >= FY_SAVE_INTERVAL) {
         if (fyDetCount > 0 && fyDirtyGen != fySavedGen) {
             fySaveSession();
         }
