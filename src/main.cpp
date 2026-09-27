@@ -792,9 +792,11 @@ static const char* checkWiFiMACPrefix(const uint8_t* mac) {
 // ============================================================================
 // Forward declarations for functions called by WiFi promiscuous callback
 static bool fyGPSIsFresh();
-// outCat / outRaven (2026-09-27) report what the detection STORES after
-// downgrades and sticky categories, read under the mutex, including when the
-// call returns -1 (mutex timeout or array full). outCat always points into
+// outCat / outRaven (2026-09-27): on success, what the detection STORES after
+// downgrades and sticky categories, read under the mutex. On a -1 exit (mutex
+// timeout or array full) the stored row could not be read, so they carry THIS
+// sighting's post-downgrade category instead, which can differ from a sticky
+// stored one; callers only alert on idx >= 0. outCat always points into
 // FY_CATEGORIES, so it stays valid after the call and across tasks.
 static int fyAddDetection(const char* mac, const char* name, int rssi,
                           const char* method, const char* category = "unknown",
@@ -807,7 +809,7 @@ static const char* fyApplyDowngrades(const char*, const char*, const char*, cons
 // Probe requests from devices scanning (on ANY channel) are caught because
 // WiFi devices sweep all channels when probing. Beacons only on AP channel.
 // NOTE: Runs on the WiFi task — do NOT call delay()/tone() here.
-// Audio/LED alerts are deferred to the main loop via fyWifiAlertPending.
+// Audio/LED alerts are deferred to the main loop via fyQueueAlert() (a pending-category mask).
 
 static void fyWifiPromiscuousCB(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (type != WIFI_PKT_MGMT) return;
@@ -1454,7 +1456,11 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
             // Morse pattern's delay()s used to stall the BLE host for up to
             // ~1.2 s right when a new device of interest appeared. loop() plays
             // it, exactly as it always did for WiFi.
-            fyQueueAlert(catStr, fyConfidence(method));
+            // Only a recorded detection alerts: on -1 catStr is this sighting's
+            // guess, and a device cleared by name that advertised nameless
+            // while an autosave held the mutex would buzz its OUI category
+            // (review F6). The WiFi path already works this way.
+            if (idx >= 0) fyQueueAlert(catStr, fyConfidence(method));
             fyDeviceInRange = true;
             fyLastDetTime = millis();
         }
@@ -1471,17 +1477,30 @@ class FYBLECallbacks : public NimBLEAdvertisedDeviceCallbacks {
 // request that carries an Origin must come from this device's own dashboard.
 // (The dashboard's own fetch() sends Origin: http://<this host>.)
 // This is a stopgap until firmware-todo #11 gives the AP a per-device password.
+// Compared against the AP's own IP, not the Host header: an attacker page
+// that DNS-rebinds its own name to this device sends Origin and Host that
+// match each other, so an Origin == Host test lets it through (review F7).
 static bool fyForeignOrigin(AsyncWebServerRequest *r) {
     if (!r->hasHeader("Origin")) return false;
     const String origin = r->header("Origin");
-    const String host = r->host();
-    if (host.length() == 0) return true;
-    return !(origin == ("http://" + host) || origin == ("https://" + host));
+    const String ip = WiFi.softAPIP().toString();
+    return !(origin == ("http://" + ip) || origin == ("https://" + ip));
 }
 
+// Take fyMutex for a web handler BEFORE any response starts. On a timeout the
+// handler must answer 503, never a well-formed empty body: an empty "[]" with
+// 200 is indistinguishable from "nothing detected", and the dashboard showed
+// exactly that false zero whenever a poll landed on an autosave (2026-09-27).
+static bool fyLockForWeb(AsyncWebServerRequest *r) {
+    if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) return true;
+    r->send(503, "application/json", "{\"error\":\"busy, retry\"}");
+    return false;
+}
+
+// Caller holds fyMutex (fyLockForWeb).
 static void writeDetectionsJSON(AsyncResponseStream *resp) {
     resp->print("[");
-    if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    {
         for (int i = 0; i < fyDetCount; i++) {
             if (i > 0) resp->print(",");
             resp->printf(
@@ -1508,7 +1527,6 @@ static void writeDetectionsJSON(AsyncResponseStream *resp) {
             }
             resp->print("}");
         }
-        xSemaphoreGive(fyMutex);
     }
     resp->print("]");
 }
@@ -1517,12 +1535,12 @@ static void writeDetectionsJSON(AsyncResponseStream *resp) {
 // SESSION PERSISTENCE (SPIFFS)
 // ============================================================================
 
-static void fySaveSession() {
-    if (!fySpiffsReady || !fyMutex) return;
-    if (xSemaphoreTake(fyMutex, pdMS_TO_TICKS(300)) != pdTRUE) return;
+static bool fySaveSession() {  // true only when the file was written
+    if (!fySpiffsReady || !fyMutex) return false;
+    if (xSemaphoreTake(fyMutex, pdMS_TO_TICKS(300)) != pdTRUE) return false;
 
     File f = SPIFFS.open(FY_SESSION_FILE, "w");
-    if (!f) { xSemaphoreGive(fyMutex); return; }
+    if (!f) { xSemaphoreGive(fyMutex); return false; }
 
     f.print("[");
     for (int i = 0; i < fyDetCount; i++) {
@@ -1554,21 +1572,23 @@ static void fySaveSession() {
     if (fyDetCount > 0 && SPIFFS.exists(FY_CLEARED_FLAG)) SPIFFS.remove(FY_CLEARED_FLAG);
     printf("[DANTIR] Session saved: %d detections\n", fyDetCount);
     xSemaphoreGive(fyMutex);
+    return true;
 }
 
-static void fyPromotePrevSession() {
-    // Copy current session to prev_session on boot, then delete original
+// Copies session.json over prev_session.json after checking it parses, then
+// removes session.json. Returns true ONLY when prev_session.json now holds it.
+static bool fyPromotePrevSession() {
     // NOTE: SPIFFS.rename() is unreliable on ESP32 — use copy+delete instead
-    if (!fySpiffsReady) return;
+    if (!fySpiffsReady) return false;
     if (!SPIFFS.exists(FY_SESSION_FILE)) {
         printf("[DANTIR] No prior session file to promote\n");
-        return;
+        return false;
     }
 
     File src = SPIFFS.open(FY_SESSION_FILE, "r");
     if (!src) {
         printf("[DANTIR] Failed to open session file for promotion\n");
-        return;
+        return false;
     }
     String data = src.readString();
     src.close();
@@ -1576,7 +1596,7 @@ static void fyPromotePrevSession() {
     if (data.length() == 0) {
         printf("[DANTIR] Session file empty, skipping promotion\n");
         SPIFFS.remove(FY_SESSION_FILE);
-        return;
+        return false;
     }
 
     // Never overwrite the backup with something that does not parse
@@ -1584,29 +1604,51 @@ static void fyPromotePrevSession() {
     // or reset mid-write leaves "[{...". This used to be copied over
     // prev_session.json unchecked, so one torn write destroyed BOTH copies and
     // restore then failed on the truncated file. Keep the good backup instead.
+    //
+    // Validated through a keep-nothing filter, so the parser checks every byte
+    // without building the document: a 200-record session no longer has to
+    // fit in heap twice (review F5). An out-of-memory result is NOT evidence of
+    // corruption, so it keeps the file and skips the promote.
     {
+        JsonDocument filter;
+        filter.set(false);
         JsonDocument probe;
-        DeserializationError perr = deserializeJson(probe, data);
-        if (perr || !probe.is<JsonArray>()) {
+        DeserializationError perr = deserializeJson(probe, data, DeserializationOption::Filter(filter));
+        int firstChar = 0;
+        while (firstChar < (int)data.length() && isspace((unsigned char)data[firstChar])) firstChar++;
+        const bool isArray = firstChar < (int)data.length() && data[firstChar] == '[';
+        if (perr == DeserializationError::NoMemory) {
+            printf("[DANTIR] Not enough heap to check session file (%d bytes): left in place, not promoted\n",
+                   data.length());
+            return false;
+        }
+        if (perr || !isArray) {
             printf("[DANTIR] Session file unreadable (%s), %d bytes: keeping prev_session, discarding it\n",
                    perr ? perr.c_str() : "not an array", data.length());
             SPIFFS.remove(FY_SESSION_FILE);
-            return;
+            return false;
         }
     }
 
-    // Write to prev_session (overwrite any existing)
+    // Write to prev_session (overwrite any existing). Written size is checked:
+    // a full filesystem is a short write, not a backup.
     File dst = SPIFFS.open(FY_PREV_FILE, "w");
     if (!dst) {
         printf("[DANTIR] Failed to create prev_session file\n");
-        return;
+        return false;
     }
-    dst.print(data);
+    const size_t wrote = dst.print(data);
     dst.close();
+    if (wrote != data.length()) {
+        printf("[DANTIR] prev_session short write (%u of %u bytes): session.json kept\n",
+               (unsigned)wrote, (unsigned)data.length());
+        return false;
+    }
 
     // Delete the old session file so it doesn't get re-promoted next boot
     SPIFFS.remove(FY_SESSION_FILE);
     printf("[DANTIR] Prior session promoted: %d bytes\n", data.length());
+    return true;
 }
 
 // Restore detections from prev_session into live array (append mode)
@@ -1619,8 +1661,10 @@ static void fyRestoreSession() {
     // A clear leaves this marker. prev_session.json then holds the pre-clear
     // backup (still served by /api/history), but it must not be loaded back
     // into the live list, or a cleared session reappears on the next boot.
+    // The marker is NOT consumed here: it lives until fySaveSession writes
+    // real post-clear data. Consuming it here meant the SECOND reboot after a
+    // clear, with nothing new detected, restored the cleared list (review F1).
     if (SPIFFS.exists(FY_CLEARED_FLAG)) {
-        SPIFFS.remove(FY_CLEARED_FLAG);
         printf("[DANTIR] Detections were cleared before this boot: prev_session kept as history, not restored\n");
         return;
     }
@@ -1724,7 +1768,7 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
                 "<Style id=\"interp\"><IconStyle><color>8044aaaa</color>"
                 "<scale>0.8</scale></IconStyle></Style>\n");
 
-    if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+    {  // caller holds fyMutex (fyLockForWeb)
         for (int i = 0; i < fyDetCount; i++) {
             FYDetection& d = fyDet[i];
             if (!d.hasGPS && !d.hasBestGPS) continue;  // Skip detections without any GPS
@@ -1765,7 +1809,7 @@ static void writeDetectionsKML(AsyncResponseStream *resp) {
                          pinLon, pinLat);
             resp->print("</Placemark>\n");
         }
-        xSemaphoreGive(fyMutex);
+        // caller releases fyMutex
     }
     resp->print("</Document>\n</kml>");
 }
@@ -1870,8 +1914,8 @@ h4{color:var(--a1);font-size:14px;margin-bottom:8px}
 </select>
 </div>
 <div class="st">
-<div class="sc"><div class="n" id="sT">0</div><div class="l"><span class="pulse"></span>DETECTED</div></div>
-<div class="sc"><div class="n" id="sR">0</div><div class="l">RAVEN</div></div>
+<div class="sc"><div class="n" id="sT">--</div><div class="l"><span class="pulse"></span>DETECTED</div></div>
+<div class="sc"><div class="n" id="sR">--</div><div class="l">RAVEN</div></div>
 <div class="sc"><div class="n" id="sB">ON</div><div class="l">BLE+WiFi</div></div>
 <div class="sc" onclick="reqGPS()" style="cursor:pointer"><div class="n" id="sG" style="font-size:14px">TAP</div><div class="l" id="sGL">GPS</div></div>
 <div class="sc"><div class="n" id="sBat" style="font-size:12px">--</div><div class="l" id="sBatL">UPTIME</div></div>
@@ -2169,8 +2213,10 @@ static void fySetupServer() {
 
     // API: Detection list
     fyServer.on("/api/detections", HTTP_GET, [](AsyncWebServerRequest *r) {
+        if (!fyLockForWeb(r)) return;
         AsyncResponseStream *resp = r->beginResponseStream("application/json");
         writeDetectionsJSON(resp);
+        xSemaphoreGive(fyMutex);
         r->send(resp);
     });
 
@@ -2279,18 +2325,21 @@ static void fySetupServer() {
 
     // API: Export JSON (downloadable file)
     fyServer.on("/api/export/json", HTTP_GET, [](AsyncWebServerRequest *r) {
+        if (!fyLockForWeb(r)) return;
         AsyncResponseStream *resp = r->beginResponseStream("application/json");
         resp->addHeader("Content-Disposition", "attachment; filename=\"dantir_detections.json\"");
         writeDetectionsJSON(resp);
+        xSemaphoreGive(fyMutex);
         r->send(resp);
     });
 
     // API: Export CSV (downloadable file, includes GPS)
     fyServer.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *r) {
+        if (!fyLockForWeb(r)) return;
         AsyncResponseStream *resp = r->beginResponseStream("text/csv");
         resp->addHeader("Content-Disposition", "attachment; filename=\"dantir_detections.csv\"");
         resp->println("mac,name,rssi,method,first_seen_ms,last_seen_ms,count,is_raven,raven_fw,latitude,longitude,gps_accuracy,best_rssi,best_latitude,best_longitude,best_gps_accuracy,gps_interp,confidence");
-        if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        {
             for (int i = 0; i < fyDetCount; i++) {
                 FYDetection& d = fyDet[i];
                 // Spreadsheets evaluate a quoted cell that starts with = + - @
@@ -2316,16 +2365,19 @@ static void fySetupServer() {
                 resp->printf(",%s,%s\n", (d.hasGPS && d.gpsInterp) ? "true" : "false",
                              d.confidence);
             }
-            xSemaphoreGive(fyMutex);
+        // lock released after the block
         }
+        xSemaphoreGive(fyMutex);
         r->send(resp);
     });
 
     // API: Export KML (GPS-tagged detections for Google Earth)
     fyServer.on("/api/export/kml", HTTP_GET, [](AsyncWebServerRequest *r) {
+        if (!fyLockForWeb(r)) return;
         AsyncResponseStream *resp = r->beginResponseStream("application/vnd.google-earth.kml+xml");
         resp->addHeader("Content-Disposition", "attachment; filename=\"dantir_detections.kml\"");
         writeDetectionsKML(resp);
+        xSemaphoreGive(fyMutex);
         r->send(resp);
     });
 
@@ -2430,15 +2482,21 @@ static void fySetupServer() {
         }
         // Only back up when there is something to back up: clearing an empty
         // list would otherwise save "[]" and promote it over the real backup.
+        // Nothing is wiped unless the save AND the promote both succeeded: a
+        // save that timed out on the mutex (an autosave in progress) used to be
+        // ignored, the promote then read a half-written file, discarded it,
+        // and the list was cleared with no backup at all (review F2).
         bool backedUp = false;
         if (fySpiffsReady && fyDetCount > 0) {
-            fySaveSession();
-            fyPromotePrevSession();
-            backedUp = SPIFFS.exists(FY_PREV_FILE);
-        }
-        if (fySpiffsReady) {
-            File flag = SPIFFS.open(FY_CLEARED_FLAG, "w");
-            if (flag) { flag.print("1"); flag.close(); }
+            if (!fySaveSession()) {
+                r->send(503, "application/json", "{\"error\":\"busy saving, try again (nothing cleared)\"}");
+                return;
+            }
+            if (!fyPromotePrevSession()) {
+                r->send(500, "application/json", "{\"error\":\"backup failed (nothing cleared)\"}");
+                return;
+            }
+            backedUp = true;
         }
         bool cleared = false;
         if (fyMutex && xSemaphoreTake(fyMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
@@ -2450,10 +2508,17 @@ static void fySetupServer() {
             xSemaphoreGive(fyMutex);
             cleared = true;
         }
-        fyClearAlertedPending = true;  // loop() owns the alerted-category table
         if (!cleared) {
-            r->send(503, "application/json", "{\"error\":\"busy, try again\"}");
+            // The list is still live and still backed up in prev_session.json,
+            // so a reboot restores it: no marker, nothing lost (review F3).
+            r->send(503, "application/json", "{\"error\":\"busy, try again (nothing cleared)\"}");
             return;
+        }
+        fyClearAlertedPending = true;  // loop() owns the alerted-category table
+        // Marker only after the clear really happened (review F3).
+        if (fySpiffsReady) {
+            File flag = SPIFFS.open(FY_CLEARED_FLAG, "w");
+            if (flag) { flag.print("1"); flag.close(); }
         }
         r->send(200, "application/json",
                 backedUp ? "{\"status\":\"cleared\",\"backup\":\"prev_session\"}"
