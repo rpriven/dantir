@@ -60,7 +60,21 @@ try {
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
-const bad = findings.filter(f => f.RuleID !== "wireguard-private-key" || !PNG_TAIL.test(f.Match.trim()));
+// A finding is only a known false positive when ALL of these hold: it is the
+// wireguard rule, its match ends in the PNG IEND trailer, and the match sits
+// inside a base64 PNG data URL on its own line. The suffix alone is not enough
+// (cross-vendor review, 2026-09-27): a real key that happened to end in those
+// characters would otherwise be allowlisted by this script.
+const pageLines = readFileSync(join(REPO, TARGET), "utf8").split("\n");
+const inPngDataUrl = (f: Finding) => {
+  const line = pageLines[f.StartLine - 1] ?? "";
+  const m = f.Match.trim();
+  const at = line.indexOf(m);
+  if (at < 0) return false;
+  const start = line.lastIndexOf("data:image/png;base64,", at);
+  return start >= 0 && /^[A-Za-z0-9+/=]*$/.test(line.slice(start + "data:image/png;base64,".length, at));
+};
+const bad = findings.filter(f => f.RuleID !== "wireguard-private-key" || !PNG_TAIL.test(f.Match.trim()) || !inPngDataUrl(f));
 if (bad.length) {
   console.error("gitleaks found something that is not an inlined Leaflet PNG. Not allowlisting it:");
   for (const f of bad) console.error(`  ${f.RuleID} line ${f.StartLine}: ${f.Match.slice(0, 80)}`);
