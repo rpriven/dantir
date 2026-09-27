@@ -8,6 +8,9 @@
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css"/>
 <script src="vendor/leaflet/leaflet.js"></script>
 <!-- DANTIR-VENDOR-END -->
+<!-- DANTIR-SHARED-START -->
+<script src="dantir-merge.js"></script>
+<!-- DANTIR-SHARED-END -->
 <style>
   /* Variables mirror the device dashboard's themes (purple / tactical / ithildin); setTheme() swaps them at runtime. */
   :root { --bg-body: #0a0012; --bg-hdr: #1a0033; --bg-card: linear-gradient(135deg, rgba(45,27,105,.85), rgba(30,15,80,.78));
@@ -93,44 +96,14 @@ const COLOR_MAP = {
   lawenf: "#8b0000", lawenf_fixed: "#5a0000", lawenf_mobile: "#c0392b",
   ring: "#1e90ff", camera: "#2e8b57", raven: "#ef4444",
   surveillance_glasses: "#9370db", glasses: "#9370db", vr_headset: "#c9b6e4",
-  tracker: "#fb923c", wifi: "#22c55e", false_positive: "#999999", unknown: "#ffa500",
+  tracker: "#fb923c", wifi: "#22c55e",
+  known_benign: "#6b8e23",  // identified by the firmware as a harmless device: muted olive, not unknown orange or false-positive grey
+  false_positive: "#999999", unknown: "#ffa500",
 };
-const FALSE_POSITIVE_NAMES = [  // name substring (lower-case) → reason. Only applied to mac_prefix matches.
-  ["hue", "Philips Hue lamp (OUI collision)"],
-  ["bluedriv", "BlueDriver OBD-II scanner (OUI collision)"],
-  ["wyze lock", "Wyze Lock (OUI collision)"],
-  ["ooler", "OOLER bed-cooling unit (Espressif OUI collision)"],
-  ["square reader", "Square payment reader (Espressif OUI collision)"],
-];
-// KML and CSV exports carry no category; infer one from the advertised name so those sessions
-// are not all "unknown". JSON exports keep the firmware's category. Order matters: first hit wins.
-const NAME_CATEGORY = [
-  [/^penguin-/i, "flock"], [/^flock/i, "flock"], [/^ring\b|^ring-/i, "ring"], [/^blink/i, "ring"],
-  [/wyze/i, "camera"], [/^eufy/i, "camera"], [/^arlo/i, "camera"], [/^nest ?cam/i, "camera"],
-  [/^quest\b|^pico\b/i, "vr_headset"], [/ray-?ban|meta glasses/i, "surveillance_glasses"],
-  [/^tile\b|airtag|smarttag/i, "tracker"], [/^axon\b/i, "axon"],
-];
-function categoryFromName(name) {
-  if (!name) return null;
-  for (const [re, cat] of NAME_CATEGORY) if (re.test(name)) return cat;
-  return null;
-}
-const FIXED_RADIUS_M = 150;   // seen in 2+ sessions within this radius → fixed install
-const SPLIT_FIXED_MOBILE = new Set(["axon", "lawenf"]);  // categories whose fixed/mobile distinction matters
+// Merge, confidence, name categories and the fixed-install test live in dantir-merge.js (shared with build-map.ts).
+const { merge, exportRecord } = window.DantirMerge;
 
 const state = { files: [], raw: [], merged: [], layers: {}, map: null, legend: null, stats: null, baseCtl: null, dates: null, offDates: new Set(), offCats: new Set(), unreadable: [], showLow: false, lowHidden: 0 };
-
-// Confidence mirrors the firmware's fyConfidence(): a device's own name, its
-// manufacturer ID, a GATT service UUID or a SoftAP SSID identify a PRODUCT; a
-// MAC prefix only identifies a MODULE VENDOR (Liteon, Silicon Labs, Samsung)
-// and is a lead, not an ID. Exports written before 2026-09-20 carry no "conf"
-// field, so it is derived from the method here — otherwise every historical
-// session would vanish behind the default filter.
-const HIGH_CONF_METHODS = new Set(["device_name","ble_mfr_id","raven_uuid","flock_uuid","wifi_ssid"]);
-function confOf(d) {
-  if (d.conf === "high" || d.conf === "low") return d.conf;
-  return HIGH_CONF_METHODS.has(d.method) ? "high" : "low";
-}
 
 // ── themes: the same three as the device dashboard (values copied from its TH table) ──
 const TH = {
@@ -174,13 +147,18 @@ function parseCSV(text) {
     const c = splitCsv(line);
     const mac = c[idx("mac")]; if (!mac) continue;
     const num = n => { const v = c[idx(n)]; return v === undefined || v === "" ? undefined : Number(v); };
-    const d = { mac, name: c[idx("name")] || "", rssi: num("rssi"), method: c[idx("method")] || "", cat: c[idx("cat")] || c[idx("category")] || "",
+    // The firmware prefixes a name that starts with = + - @ with an apostrophe
+    // so a spreadsheet will not evaluate it (2026-09-27); undo that here.
+    const rawName = c[idx("name")] || "";
+    const d = { mac, name: /^'[=+\-@]/.test(rawName) ? rawName.slice(1) : rawName, rssi: num("rssi"), method: c[idx("method")] || "", cat: c[idx("cat")] || c[idx("category")] || "",
       first: num("first_seen_ms"), last: num("last_seen_ms"), count: num("count") || 1, best_rssi: num("best_rssi") };
     const lat = num("latitude"), lon = num("longitude");
     if (lat !== undefined && lon !== undefined) d.gps = { lat, lon, acc: num("gps_accuracy") };
     const blat = num("best_latitude"), blon = num("best_longitude");
     if (blat !== undefined && blon !== undefined) d.best_gps = { lat: blat, lon: blon, acc: num("best_gps_accuracy") };
-    const cf = field("confidence"); if (cf) d.conf = cf;
+    // Was field("confidence"): field() only exists inside parseKML, so every
+    // CSV drop threw a ReferenceError and landed in "could not read" (06a7fd1).
+    const cf = c[idx("confidence")]; if (cf) d.conf = cf;
     out.push(d);
   }
   return out;
@@ -220,65 +198,7 @@ function parseFile(name, text) {
 }
 
 // ── merge ──
-function haversineM(a, b) {
-  const R = 6371000, toR = x => x * Math.PI / 180;
-  const dLat = toR(b.lat - a.lat), dLon = toR(b.lon - a.lon);
-  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toR(a.lat)) * Math.cos(toR(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(s));
-}
-function falsePositive(name, method) {
-  if (!name || method !== "mac_prefix") return null;
-  const n = name.toLowerCase();
-  for (const [pat, reason] of FALSE_POSITIVE_NAMES) if (n.includes(pat)) return reason;
-  return null;
-}
-function merge(sessions) {  // sessions: [{date, name, detections}]
-  const byMac = new Map();
-  let noGps = 0;
-  for (const s of sessions) {
-    for (const d of s.detections) {
-      const mac = String(d.mac).toLowerCase();
-      const gps = d.best_gps || d.gps;
-      const rssi = Number(d.best_rssi ?? d.rssi ?? -100);
-      const count = Number(d.count) || 1;
-      let m = byMac.get(mac);
-      if (!m) {
-        m = { mac, names: [], conf: "low", cat: d.cat && d.cat !== "unknown" ? d.cat : "unknown", method: d.method || "unknown",
-          best_rssi: -999, total_count: 0, sessions: [], fixes: [], lat: null, lon: null, fp_reason: falsePositive(d.name, d.method) };
-        byMac.set(mac, m);
-      }
-      if (confOf(d) === "high") m.conf = "high";
-      if (d.name && !m.names.includes(d.name)) m.names.push(d.name);
-      if (d.cat && d.cat !== "unknown" && m.cat === "unknown") m.cat = d.cat;
-      if (m.cat === "unknown" && !m.fp_reason) { const nc = categoryFromName(d.name); if (nc) m.cat = nc; }
-      if (!m.sessions.includes(s.date)) m.sessions.push(s.date);
-      m.total_count += count;
-      if (!gps) { noGps++; continue; }
-      m.fixes.push({ date: s.date, lat: gps.lat, lon: gps.lon, rssi });
-      if (rssi > m.best_rssi) { m.best_rssi = rssi; m.lat = gps.lat; m.lon = gps.lon; }
-    }
-  }
-  const merged = [];
-  for (const m of byMac.values()) {
-    m.sessions.sort();
-    const datesWithFix = new Set(m.fixes.map(f => f.date));
-    if (datesWithFix.size >= 2 && m.lat !== null) {
-      const anchor = { lat: m.lat, lon: m.lon };
-      const spread = Math.max(...m.fixes.map(f => haversineM(anchor, f)));
-      m.fixed = spread <= FIXED_RADIUS_M; m.spread_m = Math.round(spread);
-    } else { m.fixed = null; }
-    // Persistence IS evidence in a way a module vendor never was: the same MAC
-    // on 2+ separate dates inside FIXED_RADIUS_M is an installation, not a
-    // passer-by. That earns a low-confidence OUI hit its way into the default
-    // view, and it is the only promotion path that does not require guessing.
-    if (m.conf === "low" && m.fixed === true) { m.conf = "high"; m.promoted = true; }
-    if (SPLIT_FIXED_MOBILE.has(m.cat) && m.fixed !== null) m.cat = m.cat + (m.fixed ? "_fixed" : "_mobile");
-    m.display_cat = m.fp_reason ? "false_positive" : m.cat;
-    merged.push(m);
-  }
-  merged.sort((a, b) => b.total_count - a.total_count);
-  return { merged, noGps };
-}
+// merge() comes from dantir-merge.js
 
 // ── render ──
 function popupFor(m) {
@@ -444,8 +364,7 @@ function allCats(on) {
   cats.forEach(c => setCat(c, on));
 }
 function exportMerged() {
-  const out = state.merged.map(m => ({ mac: m.mac, names: m.names, cat: m.cat, method: m.method, lat: m.lat, lon: m.lon,
-    best_rssi: m.best_rssi, total_count: m.total_count, sessions_seen: m.sessions, fixed_install: m.fixed, spread_m: m.spread_m ?? null, false_positive_reason: m.fp_reason }));
+  const out = state.merged.map(exportRecord);
   const blob = new Blob([JSON.stringify({ generated: new Date().toISOString(), detections: out }, null, 2)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "dantir-merged-" + new Date().toISOString().slice(0, 10) + ".json"; a.click(); URL.revokeObjectURL(a.href);
 }

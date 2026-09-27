@@ -3,10 +3,13 @@
 //
 //   bun tools/map/build-map.ts <file-or-dir> [more...] [-o out.html]
 //   bun tools/map/build-map.ts --standalone [-o out.html]     # no data: one-file drop-in page
+//   bun tools/map/build-map.ts <file-or-dir> --merged m.json    # also write the merged per-MAC records
 //
 // Walks the given files/directories for Dantir JSON exports (arrays of
 // detections with a `mac` field), embeds them into a copy of dantir-map.html
-// with Leaflet inlined, and writes a single portable file. Nothing is uploaded;
+// with Leaflet and dantir-merge.js inlined, and writes a single portable file.
+// The merge and fixed-install test come from dantir-merge.js, the same file the
+// page runs, so the verdicts printed here are the ones the map shows. Nothing is uploaded;
 // the output only contacts the basemap provider the viewer picks ("None" = no
 // requests at all). Session dates come from the filename (dantir_YYYY-MM-DD_…),
 // falling back to the file's mtime.
@@ -16,17 +19,27 @@
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "fs";
 import { join, dirname, basename, resolve } from "path";
+const DantirMerge = require("./dantir-merge.js") as {
+  merge: (s: Session[]) => { merged: { mac: string; cat: string; fixed: boolean | null; spread_m?: number; promoted?: boolean; sessions: string[] }[]; noGps: number };
+  exportRecord: (m: unknown) => unknown;
+  FIXED_RADIUS_M: number;
+};
 
 const HERE = import.meta.dir;
 const args = process.argv.slice(2);
 let out = join(HERE, "out", "dantir-map.html");
 let standalone = false;
+let mergedOut: string | null = null;
 const inputs: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--standalone") { standalone = true; continue; }
   if (args[i] === "-o" || args[i] === "--out") {
     if (!args[i + 1]) { console.error("-o needs a path"); usage(); process.exit(2); }
     out = resolve(args[++i]); continue;
+  }
+  if (args[i] === "--merged") {
+    if (!args[i + 1]) { console.error("--merged needs a path"); usage(); process.exit(2); }
+    mergedOut = resolve(args[++i]); continue;
   }
   if (args[i] === "-h" || args[i] === "--help") { usage(); process.exit(0); }
   if (args[i].startsWith("-")) { console.error(`Unknown flag ${args[i]}`); usage(); process.exit(2); }
@@ -35,7 +48,7 @@ for (let i = 0; i < args.length; i++) {
 if (!inputs.length && !standalone) { usage(); process.exit(2); }
 
 function usage() {
-  console.log("usage: bun build-map.ts <file-or-dir> [more...] [-o out.html]");
+  console.log("usage: bun build-map.ts <file-or-dir> [more...] [-o out.html] [--merged merged.json]");
   console.log("       bun build-map.ts --standalone [-o out.html]   (drop-in page as ONE file, no data)");
 }
 
@@ -76,6 +89,15 @@ if (!standalone) {
   if (!sessions.length) { console.error("No Dantir JSON exports found under: " + inputs.join(", ")); process.exit(1); }
   console.log(`Found ${sessions.length} session file(s):`);
   for (const s of sessions) console.log(`  ${s.date}  ${s.name}  (${s.detections.length} detections)`);
+  const { merged } = DantirMerge.merge(sessions);
+  const fixed = merged.filter(m => m.fixed === true);
+  console.log(`${merged.length} unique MACs; fixed installs (2+ dates within ${DantirMerge.FIXED_RADIUS_M} m): ${fixed.length}`);
+  for (const m of fixed) console.log(`  fixed  ${m.cat}  spread ${m.spread_m} m  ${m.sessions.join(",")}${m.promoted ? "  (promoted low->high)" : ""}`);
+  if (mergedOut) {
+    mkdirSync(dirname(mergedOut), { recursive: true });
+    writeFileSync(mergedOut, JSON.stringify({ detections: merged.map(DantirMerge.exportRecord) }, null, 2));
+    console.log(`Wrote ${mergedOut} (merged per-MAC records, same shape as the page export; holds your MACs)`);
+  }
 }
 
 // Inline the vendored Leaflet so the output is one file.
@@ -83,14 +105,19 @@ const page = readFileSync(join(HERE, "dantir-map.html"), "utf8");
 const css = readFileSync(join(HERE, "vendor", "leaflet", "leaflet.css"), "utf8")
   .replace(/url\(images\/([^)]+)\)/g, (_m, f) => `url(data:image/png;base64,${readFileSync(join(HERE, "vendor", "leaflet", "images", f)).toString("base64")})`);
 const js = readFileSync(join(HERE, "vendor", "leaflet", "leaflet.js"), "utf8");
+const shared = readFileSync(join(HERE, "dantir-merge.js"), "utf8");
+if (/<\/script|<!--/i.test(shared)) { console.error("dantir-merge.js must not contain </script or <!-- (it is inlined into a <script>)"); process.exit(1); }
 const vendorBlock = /<!-- DANTIR-VENDOR-START -->[\s\S]*?<!-- DANTIR-VENDOR-END -->/;
+const sharedBlock = /<!-- DANTIR-SHARED-START -->[\s\S]*?<!-- DANTIR-SHARED-END -->/;
 if (!vendorBlock.test(page)) { console.error("dantir-map.html is missing the vendor markers"); process.exit(1); }
+if (!sharedBlock.test(page)) { console.error("dantir-map.html is missing the shared-module markers"); process.exit(1); }
 // Device names are attacker-controlled (BLE advertisements). Inside a <script>, "</script>" and "<!--"
 // change how the browser parses the block, so every "<" in the embedded JSON becomes \u003c.
 const dataJson = JSON.stringify(sessions).replace(/</g, "\\u003c");
 const dataTag = standalone ? "" : `\n<script>window.DANTIR_DATA=${dataJson};</script>`;
-const html = page.replace(vendorBlock,
-  `<style>\n${css}\n</style>\n<script>\n${js}\n</script>${dataTag}`);
+const html = page
+  .replace(vendorBlock, () => `<style>\n${css}\n</style>\n<script>\n${js}\n</script>${dataTag}`)
+  .replace(sharedBlock, () => `<script>\n${shared}</script>`);
 
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, html);

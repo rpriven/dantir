@@ -5,7 +5,7 @@ Put your Dantir exports on a map. One HTML file, no install, nothing uploaded.
 ## Quick start
 
 1. Download **`dantir-map.standalone.html`** (one file, Leaflet inlined, nothing else needed),
-   or clone the repo and use `dantir-map.html` with the `vendor/` folder beside it.
+   or clone the repo and use `dantir-map.html` with `dantir-merge.js` and the `vendor/` folder beside it.
 2. Open it in a browser. Nothing is hosted anywhere; it runs from your disk.
 3. Drop your exports on it: the `.json`, `.kml`, or `.csv` files the dashboard's
    DOWNLOAD buttons give you. Drop as many as you like; sessions merge by MAC.
@@ -42,8 +42,12 @@ the ocean at Null Island, two devices repeated across both days).
 Detections without GPS (phone screen off, GPS not enabled on the dashboard) are
 counted in the stats box but cannot be plotted.
 
-The standalone file is regenerated with `bun tools/map/build-map.ts --standalone -o tools/map/dantir-map.standalone.html`
-whenever the page changes; the two are the same renderer.
+The standalone file is regenerated with `bun tools/map/rebuild-standalone.ts` whenever the page or
+`dantir-merge.js` changes; the two are the same renderer. That script runs
+`build-map.ts --standalone` and refreshes the `.gitleaksignore` fingerprints for the inlined Leaflet images.
+
+The merge and the fixed-install test live in one file, `dantir-merge.js`. The page loads it, `build-map.ts`
+require()s it and inlines it into every page it writes, so the map and the builder cannot disagree.
 
 ## Baking many sessions into one file
 
@@ -52,7 +56,8 @@ bun tools/map/build-map.ts path/to/exports/ -o my-map.html
 ```
 
 Walks the paths you give it for Dantir JSON exports, embeds them and Leaflet into a
-single self-contained HTML file. Open it anywhere. The output holds your MACs and
+single self-contained HTML file, and prints the fixed installs it found. Add
+`--merged merged.json` to also write the per-MAC records (the same shape as the page's export). Open it anywhere. The output holds your MACs and
 coordinates: keep it out of git and off the web.
 
 Session dates come from the export filename (`dantir_YYYY-MM-DD_HHMMSS.json`);
