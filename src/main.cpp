@@ -1545,36 +1545,59 @@ static bool fySaveSession() {  // true only when the file was written
     File f = SPIFFS.open(FY_SESSION_FILE, "w");
     if (!f) { xSemaphoreGive(fyMutex); return false; }
 
-    // Every write is checked (third review F3). A full filesystem makes the
-    // writes return 0; the save then reports failure, and neither the saved
-    // generation nor the clear marker moves, so the next pass retries and a
-    // torn file is never treated as the new truth.
+    // Every write is checked, by length (third review F3; fourth review F1).
+    // SPIFFS files are stdio streams buffered 4 KB at a time and File::close()
+    // discards the final flush result, so a write can "succeed" into the buffer
+    // and still never reach flash. So: each record is formatted into a buffer
+    // of known length and must be accepted in full, and after close the file
+    // is reopened and its size must equal every byte we wrote. Anything else
+    // is a failed save: neither the saved generation nor the clear marker
+    // moves, the next pass retries, and a torn file is never the new truth.
     bool ok = true;
-    auto chk = [&ok](size_t n) { if (n == 0) ok = false; };
-    chk(f.print("["));
-    for (int i = 0; i < fyDetCount; i++) {
-        if (i > 0) chk(f.print(","));
+    size_t total = 0;
+    auto put = [&](const char* buf, int len) {
+        if (len < 0) { ok = false; return; }
+        const size_t n = f.write((const uint8_t*)buf, (size_t)len);
+        total += n;
+        if (n != (size_t)len) ok = false;
+    };
+    char rec[640];
+    put("[", 1);
+    for (int i = 0; i < fyDetCount && ok; i++) {
         FYDetection& d = fyDet[i];
-        chk(f.printf("{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
+        int len = snprintf(rec, sizeof(rec),
+                 "%s{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"method\":\"%s\","
                  "\"cat\":\"%s\","
                  "\"first\":%lu,\"last\":%lu,\"count\":%d,"
                  "\"raven\":%s,\"fw\":\"%s\",\"conf\":\"%s\"",
+                 i > 0 ? "," : "",
                  d.mac, d.name, d.rssi, d.method,
                  d.category,
                  d.firstSeen, d.lastSeen, d.count,
-                 d.isRaven ? "true" : "false", d.ravenFW, d.confidence));
-        if (d.hasGPS) {
-            chk(f.printf(",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
-                d.gpsLat, d.gpsLon, d.gpsAcc, d.gpsInterp ? ",\"gps_interp\":true" : ""));
+                 d.isRaven ? "true" : "false", d.ravenFW, d.confidence);
+        if (len >= 0 && len < (int)sizeof(rec) && d.hasGPS) {
+            len += snprintf(rec + len, sizeof(rec) - len, ",\"gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}%s",
+                d.gpsLat, d.gpsLon, d.gpsAcc, d.gpsInterp ? ",\"gps_interp\":true" : "");
         }
-        if (d.hasBestGPS) {
-            chk(f.printf(",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
-                d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc));
+        if (len >= 0 && len < (int)sizeof(rec) && d.hasBestGPS) {
+            len += snprintf(rec + len, sizeof(rec) - len, ",\"best_rssi\":%d,\"best_gps\":{\"lat\":%.8f,\"lon\":%.8f,\"acc\":%.1f}",
+                d.bestRSSI, d.bestGPSLat, d.bestGPSLon, d.bestGPSAcc);
         }
-        chk(f.print("}"));
+        if (len >= 0 && len < (int)sizeof(rec) - 1) {
+            rec[len++] = '}';
+            put(rec, len);
+        } else {
+            ok = false;  // a record that does not fit is a bug, never a silent truncation
+        }
     }
-    chk(f.print("]"));
+    if (ok) put("]", 1);
     f.close();
+    if (ok) {
+        File v = SPIFFS.open(FY_SESSION_FILE, "r");
+        const size_t onFlash = v ? v.size() : 0;
+        if (v) v.close();
+        if (onFlash != total) ok = false;
+    }
     if (!ok) {
         printf("[DANTIR] Session save FAILED (filesystem full?): will retry\n");
         xSemaphoreGive(fyMutex);
@@ -1655,7 +1678,8 @@ static bool fyPromotePrevSession() {
             File old = SPIFFS.open(FY_PREV_FILE, "r");
             if (old) { prevSize = old.size(); old.close(); }
         }
-        const size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+        const size_t totalB = SPIFFS.totalBytes(), usedB = SPIFFS.usedBytes();
+        const size_t freeBytes = usedB > totalB ? 0 : totalB - usedB;  // never wrap (fourth review F4)
         const size_t margin = 8192;
         if (freeBytes + prevSize < data.length() + margin) {
             printf("[DANTIR] Not enough flash to back up the session (%u needed, %u available): nothing overwritten\n",
@@ -1749,7 +1773,7 @@ static void fyRestoreSession() {
         det.lastSeen = d["last"] | 0UL;
         det.count = d["count"] | 1;
         det.isRaven = d["raven"] | false;
-        strlcpy(det.ravenFW, d["fw"] | "", sizeof(det.ravenFW));
+        fySanitizeName(det.ravenFW, sizeof(det.ravenFW), d["fw"] | "");  // restored from flash: same rule as names
 
         JsonObject gps = d["gps"];
         if (gps && gps["lat"]) {
@@ -2309,8 +2333,16 @@ static void fySetupServer() {
             // those used to be stored, then printed as a bare `nan` into every
             // later detection, the session file and the KML, which made the
             // dashboard's JSON unparseable and the saved session unrestorable.
-            const double lat = r->getParam("lat")->value().toDouble();
-            const double lon = r->getParam("lon")->value().toDouble();
+            // Whole-string numeric parse: atof() read "abc" or " " as 0.0,
+            // which passed the range check as Null Island (fourth review F5).
+            const String latS = r->getParam("lat")->value(), lonS = r->getParam("lon")->value();
+            char* latEnd = nullptr; char* lonEnd = nullptr;
+            const double lat = strtod(latS.c_str(), &latEnd);
+            const double lon = strtod(lonS.c_str(), &lonEnd);
+            if (latEnd == latS.c_str() || *latEnd != '\0' || lonEnd == lonS.c_str() || *lonEnd != '\0') {
+                r->send(400, "application/json", "{\"error\":\"lat/lon must be numbers\"}");
+                return;
+            }
             float acc = r->hasParam("acc") ? r->getParam("acc")->value().toFloat() : 0;
             if (!isfinite(lat) || !isfinite(lon) || fabs(lat) > 90.0 || fabs(lon) > 180.0) {
                 r->send(400, "application/json", "{\"error\":\"lat/lon out of range\"}");
@@ -2543,6 +2575,11 @@ static void fySetupServer() {
         // failed open, left no marker, so the next boot restored the pre-clear
         // backup as live detections. If the wipe then cannot take the lock, the
         // marker is removed again and nothing was cleared.
+        // Remember whether an EARLIER clear already left a marker: the busy
+        // path below must only undo the marker THIS request wrote (fourth
+        // review F2), or an empty-list clear that times out deletes the marker
+        // still protecting the previous clear.
+        const bool hadMarker = fySpiffsReady && SPIFFS.exists(FY_CLEARED_FLAG);
         if (fySpiffsReady) {
             File flag = SPIFFS.open(FY_CLEARED_FLAG, "w");
             const bool flagOk = flag && flag.print("1") == 1;
@@ -2565,7 +2602,7 @@ static void fySetupServer() {
         if (!cleared) {
             // The list is still live and still backed up in prev_session.json,
             // so a reboot restores it once the marker is gone: nothing lost.
-            if (fySpiffsReady) SPIFFS.remove(FY_CLEARED_FLAG);
+            if (fySpiffsReady && !hadMarker) SPIFFS.remove(FY_CLEARED_FLAG);
             r->send(503, "application/json", "{\"error\":\"busy, try again (nothing cleared)\"}");
             return;
         }
