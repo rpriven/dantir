@@ -17,6 +17,21 @@ see.
 
 ## What's new
 
+- **2026-09-27 · Saved data you can trust.** A fresh audit found data-loss bugs, now fixed
+  and reviewed four times across three model families. **DOWNLOAD PREV KML never worked**
+  (a route-order bug served JSON); it does now. **Autosave only fired when a new device
+  appeared**, so a better position, a clearance or a confidence upgrade could sit unsaved;
+  it now saves any change. **A brownout mid-save could destroy both the session and its
+  backup**; the backup is now parse-checked and space-checked before it is replaced, and
+  every save is verified on flash. **Clear really backs up first**, and a cleared list no
+  longer comes back after a reboot. Phone GPS input is validated (no more Null Island or
+  `nan`), and clear and GPS are POST with an origin check. The dashboard never shows a
+  false "0 devices": it says when it cannot reach the device, how stale its data is, and
+  when storage is full. Alerts from both radios are queued off the radio callbacks, a
+  cleared device never buzzes as a threat, and the candidate (Q), Axon (A) and
+  false-positive (II) letters, which could never play, now do. On the map: CSV drops
+  work (they always failed), `known_benign` has its own colour, and the drop-in page and
+  the baked map share one merge module.
 - **2026-09-20 · Confidence is a field, not a comment.** Every detection now carries
   `conf: high|low`. A device's own name, manufacturer ID, GATT UUID or SoftAP SSID is
   `high`; any bare OUI-prefix match is `low`. Low-confidence hits are logged and exported
@@ -81,7 +96,10 @@ only a vendor prefix matched.
 
 Detections are grouped into **thirteen categories**. High-confidence hits beep the
 category's Morse letter; low-confidence hits beep one dit whatever the category, so a
-shared vendor prefix can never sound like a confirmed camera:
+shared vendor prefix can never sound like a confirmed camera. Four categories play their
+own letter at any confidence, because the letter already says how sure it is:
+`flock_candidate`, `axon` (its prefix is Axon's own IEEE block), `false_positive` and
+`known_benign`:
 
 | Category | Morse | What it covers |
 |----------|:-----:|----------------|
@@ -95,7 +113,7 @@ shared vendor prefix can never sound like a confirmed camera:
 | `camera`     | ··· (S)  | Other surveillance cameras (Hikvision, Arlo, Wyze) |
 | `raven`      | ···- (V) | Raven gunshot-detector nodes |
 | `wifi`       | ·-- (W)  | Generic WiFi-side detections |
-| `flock_candidate` | --·- (Q) | A lead worth a look, not an identification (today only produced by `name_pattern`, so it sounds as one dit under the low-confidence rule) |
+| `flock_candidate` | --·- (Q) | A lead worth a look, not an identification (produced by `name_pattern`; plays Q even though it is low confidence) |
 | `false_positive` | ·· (I) | A prefix hit whose name proves it is something else (a Hue lamp, a Wyze lock, an OBD-II dongle) |
 | `known_benign` | ·· (I) | On your own field-cleared list (see [Key configuration](#key-configuration)) |
 
@@ -127,8 +145,9 @@ shared vendor prefix can never sound like a confirmed camera:
 - **GPS tagging** — hardware GNSS (Seeed L76K) with phone-browser geolocation
   fallback; tracks both first-seen and **peak-RSSI (closest-approach)** position.
 - **Exports** — download a session as JSON, CSV, or KML (Google Earth).
-- **Session persistence** — detections survive reboots; the prior session is
-  auto-backed up to onboard flash.
+- **Session persistence** — every change is saved to onboard flash within ~15 s and
+  verified on flash; detections survive reboots, and the prior session is kept as a
+  backup that is never overwritten by an unreadable or incomplete file.
 - **Optional battery monitoring** — LiPo percentage via a voltage divider, or
   uptime display if the ADC is disabled.
 
@@ -206,17 +225,22 @@ extension for VS Code).
 4. **Walk.** Watch the radar and detection cards populate. Listen for the
    Morse-letter beeps to ID categories by ear.
 5. **Export.** Download the session as JSON / CSV / KML, or clear it to start
-   fresh (the cleared session is backed up automatically).
+   fresh. The cleared list is backed up to the prior session (PREV tab and the PREV
+   downloads) and does not come back as live detections after a reboot. If the device
+   is busy saving, clear says so and changes nothing.
 
 ### Web API
 
-The onboard server (port 80) exposes a small JSON API used by the dashboard:
+The onboard server (port 80) exposes a small JSON API used by the dashboard. Routes that
+read the detection list answer **503** if the device is busy saving, never an empty list,
+so a client can tell "busy" from "nothing detected"; the dashboard shows that as a stale
+banner and keeps the last data.
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /` | Dashboard UI |
 | `GET /api/detections` | Live detection list |
-| `GET /api/stats` | Counts, GPS status, battery/uptime |
+| `GET /api/stats` | Counts, GPS status, battery/uptime; `full` is true when the list is at capacity |
 | `POST /api/gps?lat=&lon=&acc=` | Push phone GPS to the device (rejects non-finite or out-of-range values; cross-origin requests refused) |
 | `GET /api/patterns` | Full signature database (MACs, names, MFR IDs, UUIDs) |
 | `GET /api/export/{json,csv,kml}` | Download current session |
@@ -243,8 +267,11 @@ on every path before they reach an export or the dashboard (quotes, backslashes,
 angle brackets, ampersands and control bytes become `_`; a CSV name that starts
 with `=`, `+`, `-` or `@` is prefixed so a spreadsheet will not evaluate it).
 
-Sessions auto-save to onboard flash (SPIFFS) every ~15 s and are restored on
-boot, so a power cycle won't lose your data.
+Sessions auto-save to onboard flash (SPIFFS) within ~15 s of any change and are
+restored on boot. Each save is checked on flash (the written length must match), and
+the prior-session backup is only replaced by a file that parses and fits. A power loss
+in the middle of a save can still lose the changes since the last good save, but no
+longer the backup.
 
 ---
 
@@ -256,7 +283,10 @@ boot, so a power cycle won't lose your data.
 drop the `.json` / `.kml` / `.csv` files from the dashboard onto it. Sessions
 merge by MAC, categories are click-to-filter, and the basemap picker includes a
 **None** option so the page makes zero network requests. Everything runs in the
-tab; nothing is uploaded. Leaflet is vendored, so no CDN either.
+tab; nothing is uploaded. Leaflet is vendored, so no CDN either. Keep
+`dantir-merge.js` next to the page (it holds the merge and fixed-install logic, shared
+with the baker), or use the one-file
+[`dantir-map.standalone.html`](tools/map/dantir-map.standalone.html), which has it built in.
 
 To bake many sessions into one portable file:
 
